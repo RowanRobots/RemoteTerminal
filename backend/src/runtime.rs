@@ -120,12 +120,17 @@ impl RuntimeManager for ShellRuntimeManager {
         }
 
         let mut dtach_cmd = Command::new("dtach");
+        let workdir_escaped = workdir.to_string_lossy().replace('\'', "'\"'\"'");
+        let shell_cmd = format!(
+            "cd '{}' && codex --no-alt-screen; exec bash -i",
+            workdir_escaped
+        );
         dtach_cmd
             .arg("-n")
             .arg(sock_path)
-            .arg("codex")
-            .arg("--no-alt-screen")
-            .current_dir(workdir);
+            .arg("bash")
+            .arg("-lc")
+            .arg(shell_cmd);
 
         let _ = self.spawn_background(&mut dtach_cmd)?;
 

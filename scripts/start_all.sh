@@ -21,12 +21,12 @@ start_if_not_running() {
 
 echo "[mode] dev"
 start_if_not_running "target/debug/backend" "./scripts/start_backend.sh" "$LOG_DIR/backend.log"
-start_if_not_running "vite --host 0.0.0.0 --port 6000" "./scripts/start_frontend.sh" "$LOG_DIR/frontend.log"
+start_if_not_running "vite --host 0.0.0.0 --port 8080" "./scripts/start_frontend.sh" "$LOG_DIR/frontend.log"
 
 echo
 echo "Started (dev mode)."
-echo "URL: http://127.0.0.1:6000"
-echo "LAN URL: http://<board-ip>:6000"
+echo "URL: http://127.0.0.1:8080"
+echo "LAN URL: http://<board-ip>:8080"
 
 echo
 echo "[logs]"

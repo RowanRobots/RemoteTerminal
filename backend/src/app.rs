@@ -786,7 +786,8 @@ async fn cleanup_orphan_processes(keep_ids: &HashSet<String>, keep_socks: &HashS
     let ttyd_re = Regex::new(r"^\s*(\d+)\s+.*\bttyd\b.*-b\s+/term/([0-9a-fA-F-]{36})")
         .expect("regex compile");
     let mut ttyd_by_task: HashMap<String, Vec<i64>> = HashMap::new();
-    for line in pgrep_lines("ttyd -i 127.0.0.1 -b /term/").await {
+    // Match ttyd commands even when extra flags (e.g. -W) are inserted before -b.
+    for line in pgrep_lines(r"ttyd -i 127\.0\.0\.1 .* -b /term/").await {
         if let Some(caps) = ttyd_re.captures(&line) {
             let pid = caps
                 .get(1)
