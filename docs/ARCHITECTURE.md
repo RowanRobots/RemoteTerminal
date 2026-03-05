@@ -16,14 +16,14 @@
 1. `frontend`（任务管理页面）
 2. `control-api`（任务编排后端）
 3. `runtime`（每任务一组 `dtach + codex + ttyd`）
-4. `reverse-proxy`（Caddy，HTTPS + 鉴权 + 路由）
+4. `reverse-proxy`（HTTPS + 鉴权 + 路由）
 5. `sqlite`（任务元数据）
 
 ## 已确认选型（2026-03-04）
 1. 后端：`Rust + Axum + Tokio`
 2. 前端：`Vue 3 + Vite`
 3. 终端层：`ttyd + dtach + codex`
-4. 反向代理：`Caddy`
+4. 反向代理：通用 HTTP 反向代理
 5. 数据存储：`SQLite`
 6. 部署策略：优先宿主机进程部署（非容器强依赖）
 7. 持久化策略：保证机器运行期间会话持久；暂不覆盖机器重启恢复
@@ -34,7 +34,7 @@
 3. 资源限制：首版不做 CPU/内存限制。
 4. 回收策略：任务不自动回收。
 5. 日志策略：记录任务级与访问级日志（创建、启动、停止、删除、终端访问）。
-6. 认证策略（临时）：先使用 Caddy `basicauth` 保护入口，后续可升级 OIDC。
+6. 认证策略（临时）：先使用网关基础认证保护入口，后续可升级 OIDC。
 
 ## 部署拓扑
 1. 浏览器访问 `https://your-domain`。

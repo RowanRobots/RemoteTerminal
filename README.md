@@ -16,7 +16,6 @@
 - `backend/` 控制 API 与终端反向代理
 - `frontend/` 管理页面
 - `scripts/` 启动、构建、测试脚本
-- `Caddyfile` 反向代理与 BasicAuth 示例
 - `scripts/test_all.sh` 自动测试脚本
 - `docs/ARCHITECTURE.md` 架构文档
 
@@ -54,29 +53,6 @@ npm run dev
 开发模式下：
 - `/api/*` 与 `/term/*` 会由 Vite 代理到后端 `127.0.0.1:8080`
 
-## 使用 Caddy（推荐联调链路）
-
-1. 构建前端静态文件
-```bash
-cd /home/aro/code/RemoteTerminal
-./scripts/build_frontend.sh
-```
-
-2. 启动后端（Caddy 模式环境）
-```bash
-cd /home/aro/code/RemoteTerminal
-./scripts/start_backend_caddy.sh
-```
-
-3. 启动 Caddy
-```bash
-cd /home/aro/code/RemoteTerminal
-./scripts/start_caddy.sh
-```
-
-4. 打开页面
-- `http://127.0.0.1:8081`
-
 ## 自动测试
 
 ```bash
@@ -109,10 +85,3 @@ cd /home/aro/code/RemoteTerminal
 - `DELETE /api/tasks/{id}` 删除任务
 - `GET /api/tasks/{id}/terminal-url` 获取终端路径信息
 - `GET /api/logs?task_id=<id>&limit=<n>` 查询审计日志
-
-## Caddy 示例
-
-参考根目录 `Caddyfile`，包含：
-- BasicAuth
-- `/api/*` 与 `/term/*` 转发到后端
-- 前端静态服务转发
