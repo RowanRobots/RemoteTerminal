@@ -15,6 +15,7 @@
 
 - `backend/` 控制 API 与终端反向代理
 - `frontend/` 管理页面
+- `scripts/` 启动、构建、测试脚本
 - `Caddyfile` 反向代理与 BasicAuth 示例
 - `scripts/test_all.sh` 自动测试脚本
 - `docs/ARCHITECTURE.md` 架构文档
@@ -58,19 +59,19 @@ npm run dev
 1. 构建前端静态文件
 ```bash
 cd /home/aro/code/RemoteTerminal
-./build_frontend.sh
+./scripts/build_frontend.sh
 ```
 
 2. 启动后端（Caddy 模式环境）
 ```bash
 cd /home/aro/code/RemoteTerminal
-./start_backend_caddy.sh
+./scripts/start_backend_caddy.sh
 ```
 
 3. 启动 Caddy
 ```bash
 cd /home/aro/code/RemoteTerminal
-./start_caddy.sh
+./scripts/start_caddy.sh
 ```
 
 4. 打开页面
