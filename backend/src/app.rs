@@ -7,18 +7,33 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{Request, StatusCode},
+    extract::{
+        OriginalUri, Path as AxumPath, Query, State,
+        ws::{Message as AxumWsMessage, WebSocketUpgrade},
+    },
+    http::{Request, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use axum_reverse_proxy::{ProxyRouterExt, TargetResolver};
+use futures_util::{SinkExt, StreamExt};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message as TungsteniteMessage,
+        client::IntoClientRequest,
+        protocol::frame::{
+            Utf8Bytes as TungsteniteUtf8Bytes,
+            coding::CloseCode as TungsteniteCloseCode,
+        },
+    },
+};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::warn;
 use uuid::Uuid;
@@ -108,9 +123,11 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
         let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-        let allowed_root = PathBuf::from(
-            std::env::var("ALLOWED_ROOT").unwrap_or_else(|_| "/home/pi/code".to_string()),
-        );
+        let allowed_root = PathBuf::from(std::env::var("ALLOWED_ROOT").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|home| format!("{home}/code"))
+                .unwrap_or_else(|_| "/tmp/code".to_string())
+        }));
         let public_base_url = std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
         let min_port = std::env::var("TTYD_PORT_MIN")
@@ -169,6 +186,7 @@ pub async fn build_router(state: AppState) -> Router {
     };
 
     let term_router = Router::new()
+        .route("/term/{id}/ws", get(proxy_term_ws))
         .proxy_route("/term/{id}", resolver.clone())
         .proxy_route("/term/{id}/", resolver.clone())
         .proxy_route("/term/{id}/{*rest}", resolver)
@@ -429,6 +447,111 @@ async fn get_terminal_url(
         task_id: task.id,
         path,
         url,
+    }))
+}
+
+async fn proxy_term_ws(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    OriginalUri(original_uri): OriginalUri,
+    headers: axum::http::HeaderMap,
+    mut ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    let port = state
+        .route_map
+        .read()
+        .expect("route map lock poisoned")
+        .get(&id)
+        .copied()
+        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
+
+    let selected_subprotocol = headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next().map(str::trim))
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+
+    if let Some(subprotocol) = selected_subprotocol.clone() {
+        ws = ws.protocols([subprotocol]);
+    }
+
+    let mut upstream_url = format!("ws://127.0.0.1:{port}/term/{id}/ws");
+    if let Some(query) = original_uri.query() {
+        upstream_url.push('?');
+        upstream_url.push_str(query);
+    }
+
+    Ok(ws.on_upgrade(move |downstream| async move {
+        let mut upstream_req = match upstream_url.clone().into_client_request() {
+            Ok(req) => req,
+            Err(_) => return,
+        };
+        if let Some(subprotocol) = selected_subprotocol {
+            if let Ok(header_value) = subprotocol.parse() {
+                upstream_req
+                    .headers_mut()
+                    .insert(SEC_WEBSOCKET_PROTOCOL, header_value);
+            }
+        }
+
+        let (upstream, _) = match connect_async(upstream_req).await {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+
+        let (mut down_tx, mut down_rx) = downstream.split();
+        let (mut up_tx, mut up_rx) = upstream.split();
+
+        let downstream_to_upstream = async {
+            while let Some(msg) = down_rx.next().await {
+                let Ok(msg) = msg else { break };
+                let mapped = match msg {
+                    AxumWsMessage::Text(t) => TungsteniteMessage::Text(t.to_string().into()),
+                    AxumWsMessage::Binary(b) => TungsteniteMessage::Binary(b),
+                    AxumWsMessage::Ping(b) => TungsteniteMessage::Ping(b),
+                    AxumWsMessage::Pong(b) => TungsteniteMessage::Pong(b),
+                    AxumWsMessage::Close(cf) => {
+                        let close = cf.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: TungsteniteCloseCode::from(cf.code),
+                            reason: TungsteniteUtf8Bytes::from(cf.reason.to_string()),
+                        });
+                        TungsteniteMessage::Close(close)
+                    }
+                };
+                if up_tx.send(mapped).await.is_err() {
+                    break;
+                }
+            }
+        };
+
+        let upstream_to_downstream = async {
+            while let Some(msg) = up_rx.next().await {
+                let Ok(msg) = msg else { break };
+                let mapped = match msg {
+                    TungsteniteMessage::Text(t) => AxumWsMessage::Text(t.to_string().into()),
+                    TungsteniteMessage::Binary(b) => AxumWsMessage::Binary(b),
+                    TungsteniteMessage::Ping(b) => AxumWsMessage::Ping(b),
+                    TungsteniteMessage::Pong(b) => AxumWsMessage::Pong(b),
+                    TungsteniteMessage::Close(cf) => {
+                        let close = cf.map(|cf| axum::extract::ws::CloseFrame {
+                            code: cf.code.into(),
+                            reason: cf.reason.to_string().into(),
+                        });
+                        AxumWsMessage::Close(close)
+                    }
+                    TungsteniteMessage::Frame(_) => continue,
+                };
+                if down_tx.send(mapped).await.is_err() {
+                    break;
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = downstream_to_upstream => {}
+            _ = upstream_to_downstream => {}
+        }
     }))
 }
 

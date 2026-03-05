@@ -151,6 +151,8 @@ impl RuntimeManager for ShellRuntimeManager {
         ttyd_cmd
             .arg("-i")
             .arg("127.0.0.1")
+            // Allow keyboard input from browser clients.
+            .arg("-W")
             .arg("-b")
             .arg(format!("/term/{task_id}"))
             .arg("-p")
