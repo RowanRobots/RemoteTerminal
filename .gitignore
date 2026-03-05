@@ -1,0 +1,40 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env and local config
+.env
+.env.*
+!.env.example
+
+# Logs and runtime files
+*.log
+*.pid
+*.out
+
+# Frontend (Node/Vite)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# Backend (Rust)
+backend/target/
+
+# Local databases and sqlite sidecar files
+data/*.db
+backend/data/*.db
+*.db-shm
+*.db-wal
+
+# Generic caches / temp files
+.cache/
+tmp/
+*.tmp
+*.bak

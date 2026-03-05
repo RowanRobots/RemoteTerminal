@@ -1,0 +1,23 @@
+# 生产建议：先用 `caddy hash-password --plaintext '你的密码'` 生成哈希后替换。
+# 下方示例用户名 admin，密码 password（请务必修改）。
+
+:80 {
+  basicauth {
+    admin $2a$14$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG
+  }
+
+  @api path /api/*
+  handle @api {
+    reverse_proxy 127.0.0.1:8080
+  }
+
+  @term path /term/*
+  handle @term {
+    reverse_proxy 127.0.0.1:8080
+  }
+
+  # 前端开发服务器（生产可改成静态文件服务）
+  handle {
+    reverse_proxy 127.0.0.1:5173
+  }
+}
