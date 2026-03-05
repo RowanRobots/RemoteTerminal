@@ -5,7 +5,7 @@
 - Vue 前端（Vite）
 - 任务运行时（`dtach + codex + ttyd`）
 - 路由终端访问（`/term/{task_id}`）
-- 目录策略（仅允许 `/home/pi/code/<project>`，默认自动创建目录）
+- 目录策略（仅允许 `~/code/<project>`，默认自动创建目录）
 - 同项目创建幂等（重复创建会复用已有任务，不重复起新会话）
 - 后台收敛（启动时 + 每 30 秒自动校准状态并清理无主残留进程）
 - 不做自动回收、不做资源限制
@@ -34,6 +34,9 @@
 ```bash
 cd backend
 source "$HOME/.cargo/env"
+set -a
+source ./.env.local
+set +a
 cargo run
 ```
 
@@ -50,6 +53,29 @@ npm run dev
 开发模式下：
 - `/api/*` 与 `/term/*` 会由 Vite 代理到后端 `127.0.0.1:8080`
 
+## 使用 Caddy（推荐联调链路）
+
+1. 构建前端静态文件
+```bash
+cd /home/aro/code/RemoteTerminal
+./build_frontend.sh
+```
+
+2. 启动后端（Caddy 模式环境）
+```bash
+cd /home/aro/code/RemoteTerminal
+./start_backend_caddy.sh
+```
+
+3. 启动 Caddy
+```bash
+cd /home/aro/code/RemoteTerminal
+./start_caddy.sh
+```
+
+4. 打开页面
+- `http://127.0.0.1:8081`
+
 ## 自动测试
 
 ```bash
@@ -65,10 +91,12 @@ npm run dev
 
 - `BIND_ADDR` 默认 `0.0.0.0:8080`
 - `DATA_DIR` 默认 `./data`
-- `ALLOWED_ROOT` 默认 `/home/pi/code`
+- `ALLOWED_ROOT` 默认 `$HOME/code`
 - `PUBLIC_BASE_URL` 默认 `http://localhost:8080`
 - `TTYD_PORT_MIN` 默认 `10000`
 - `TTYD_PORT_MAX` 默认 `10999`
+
+建议本地开发时使用 `backend/.env.local`（已提供示例值）并通过 `source` 加载。
 
 ## API 摘要
 
