@@ -1,12 +1,12 @@
 :root {
-  --bg: #f3f6ef;
+  --bg: #f1f7f4;
   --panel: #ffffff;
-  --ink: #1f2a26;
-  --muted: #5d6a64;
-  --line: #d8e0d9;
-  --brand: #0d7c66;
-  --brand-2: #0f5f7a;
-  --danger: #b93737;
+  --ink: #172320;
+  --muted: #61716b;
+  --line: #d7e3dc;
+  --brand: #0e7d5f;
+  --brand-2: #136f8f;
+  --danger: #bf3a3a;
 }
 
 * {
@@ -22,28 +22,38 @@ body {
     radial-gradient(circle at 10% 10%, #d6f4e2 0%, transparent 35%),
     radial-gradient(circle at 90% 0%, #d4ebff 0%, transparent 30%),
     var(--bg);
-}
-
-.page {
-  width: min(1200px, 94vw);
-  margin: 24px auto 48px;
-  display: grid;
-  gap: 16px;
+  padding-bottom: 22px;
 }
 
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 18px;
+  border-radius: 14px;
+  padding: 14px;
   box-shadow: 0 8px 30px rgba(15, 44, 30, 0.06);
 }
 
-.hero {
+.app {
+  width: min(960px, 100vw - 20px);
+  margin: 10px auto 0;
+  display: grid;
+  gap: 10px;
+}
+
+.top {
+  display: grid;
+  gap: 10px;
+}
+
+.top h1 {
+  margin: 6px 0;
+  font-size: clamp(1.25rem, 5vw, 1.8rem);
+}
+
+.top-meta {
   display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .eyebrow {
@@ -55,66 +65,63 @@ body {
   font-weight: 700;
 }
 
-h1 {
-  margin: 8px 0;
-  font-size: clamp(1.4rem, 2.6vw, 2rem);
-}
-
 .sub {
   margin: 0;
   color: var(--muted);
-}
-
-.stats {
-  display: grid;
-  gap: 8px;
-  min-width: 140px;
+  font-size: 13px;
 }
 
 .stat {
-  display: block;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #edf3ee;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: #eef5f1;
   font-weight: 600;
-  text-align: center;
+  font-size: 13px;
 }
 
 .stat.online {
-  background: #d6f3e7;
+  background: #d8f4e7;
   color: #0d6648;
 }
 
-.form-card h2,
-.card h2 {
-  margin: 0 0 12px;
-}
-
-.grid {
+.tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
 }
 
-label span {
-  display: block;
-  font-size: 12px;
+.tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  min-height: 44px;
+  font-weight: 600;
   color: var(--muted);
-  margin-bottom: 6px;
+}
+
+.tabs button.active {
+  border-color: #b4d7c8;
+  background: #ebf7f1;
+  color: var(--ink);
 }
 
 input {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 12px;
+  min-height: 44px;
+  padding: 11px 12px;
   font-size: 14px;
 }
 
 button {
   border: 0;
   border-radius: 10px;
+  min-height: 40px;
   padding: 8px 12px;
   cursor: pointer;
   transition: transform 140ms ease, opacity 140ms ease;
@@ -136,9 +143,19 @@ button:disabled {
   font-weight: 700;
 }
 
+.block {
+  width: 100%;
+}
+
 .ghost {
   background: #eff3f0;
   color: #1f2a26;
+}
+
+.small {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
 }
 
 .danger {
@@ -146,53 +163,104 @@ button:disabled {
   color: var(--danger);
 }
 
-.msg {
-  margin: 10px 0 0;
-  font-size: 14px;
+.panel {
+  display: grid;
+  gap: 10px;
 }
 
-.msg.ok {
-  color: #0d6648;
+.filter-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
-.msg.err {
-  color: var(--danger);
+.chip {
+  flex: 0 0 auto;
+  border: 1px solid #c8d9d0;
+  background: #f5faf7;
+  min-height: 34px;
+  font-size: 13px;
 }
 
-.section-head {
+.chip.selected {
+  background: #e2f2eb;
+  border-color: #9bc9b7;
+}
+
+.task-card,
+.log-card {
+  display: grid;
+  gap: 8px;
+}
+
+.task-head {
   display: flex;
   justify-content: space-between;
+  gap: 10px;
   align-items: center;
-  margin-bottom: 12px;
 }
 
-.table-wrap {
-  width: 100%;
-  overflow: auto;
+.meta {
+  margin: 0;
+  font-size: 13px;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 860px;
+.id-text {
+  overflow-wrap: anywhere;
 }
 
-th,
-td {
-  padding: 10px;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-  vertical-align: top;
-  font-size: 14px;
+.task-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
-th {
+.task-actions .block {
+  grid-column: 1 / -1;
+}
+
+.create-panel h2 {
+  margin: 0;
+  font-size: 1.12rem;
+}
+
+.create-panel label {
+  display: grid;
+  gap: 6px;
+}
+
+.create-panel span {
   color: var(--muted);
-  font-weight: 600;
+  font-size: 13px;
+}
+
+.sticky-action {
+  position: sticky;
+  bottom: 10px;
+}
+
+.refresh-log {
+  justify-self: start;
+}
+
+.tab-count {
+  margin-left: 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #deece4;
+  color: #31574a;
 }
 
 .muted {
-  margin: 4px 0 0;
+  margin: 0;
   font-size: 12px;
   color: var(--muted);
 }
@@ -221,25 +289,63 @@ th {
   color: #b93737;
 }
 
-.actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
 .empty {
   text-align: center;
   color: var(--muted);
-  padding: 16px;
+  padding: 18px 12px;
 }
 
-@media (max-width: 900px) {
-  .hero {
-    flex-direction: column;
-    align-items: flex-start;
+.detail {
+  color: #32443d;
+  overflow-wrap: anywhere;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 24px));
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: #fff;
+  font-size: 14px;
+  box-shadow: 0 8px 24px rgba(8, 18, 14, 0.16);
+  z-index: 20;
+}
+
+.toast.ok {
+  background: #19744f;
+}
+
+.toast.err {
+  background: #b93737;
+}
+
+@media (min-width: 900px) {
+  .app {
+    margin-top: 18px;
+    gap: 14px;
   }
 
-  .grid {
-    grid-template-columns: 1fr;
+  .top {
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+  }
+
+  .top-meta {
+    justify-content: flex-end;
+  }
+
+  .panel {
+    gap: 12px;
+  }
+
+  .task-actions {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .task-actions .block {
+    grid-column: auto;
   }
 }
