@@ -39,7 +39,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    db::{Db, NewTask},
+    db::{Db, NewDiscoveredTask, NewTask},
     error::AppError,
     models::{ActionResponse, AuditLog, CreateTaskRequest, Task, TaskStatus, TerminalUrlResponse},
     runtime::RuntimeManager,
@@ -686,6 +686,67 @@ pub async fn reconcile_once(state: &AppState) -> Result<(), AppError> {
     }
 
     cleanup_orphan_processes(&healthy_ids, &healthy_socks).await;
+    Ok(())
+}
+
+pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
+    std::fs::create_dir_all(&state.allowed_root)?;
+
+    let read_dir = std::fs::read_dir(&state.allowed_root)?;
+    let mut projects = Vec::new();
+    for entry in read_dir {
+        let Ok(entry) = entry else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let project_os = entry.file_name();
+        let Some(project_str) = project_os.to_str() else {
+            continue;
+        };
+        let Ok(project) = validate_project(project_str) else {
+            continue;
+        };
+        projects.push(project);
+    }
+
+    projects.sort();
+    projects.dedup();
+
+    for project in projects {
+        if state.db.get_latest_task_by_project(&project).await?.is_some() {
+            continue;
+        }
+
+        let port = allocate_port(state).await?;
+        let id = Uuid::new_v4().to_string();
+        let workdir = state.allowed_root.join(&project);
+        let sock_path = format!("/tmp/codex-{id}.sock");
+
+        let task = state
+            .db
+            .insert_discovered_task(NewDiscoveredTask {
+                id: id.clone(),
+                name: project.clone(),
+                project: project.clone(),
+                workdir: workdir.to_string_lossy().to_string(),
+                sock_path,
+                ttyd_port: i64::from(port),
+            })
+            .await?;
+
+        let _ = state
+            .db
+            .insert_log(
+                Some(&task.id),
+                "discover",
+                &format!("discovered project directory={}", task.project),
+            )
+            .await;
+    }
+
     Ok(())
 }
 

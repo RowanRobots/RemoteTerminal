@@ -25,6 +25,16 @@ pub struct NewTask {
     pub ttyd_pid: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewDiscoveredTask {
+    pub id: String,
+    pub name: String,
+    pub project: String,
+    pub workdir: String,
+    pub sock_path: String,
+    pub ttyd_port: i64,
+}
+
 impl Db {
     pub async fn connect(db_url: &str) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::from_str(db_url)?
@@ -103,6 +113,30 @@ impl Db {
         .bind(task.ttyd_port)
         .bind(task.dtach_pid)
         .bind(task.ttyd_pid)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        self.get_task(&task.id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn insert_discovered_task(&self, task: NewDiscoveredTask) -> Result<Task, sqlx::Error> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO tasks (id, name, project, workdir, sock_path, ttyd_port, dtach_pid, ttyd_pid, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'stopped', ?, ?)
+            "#,
+        )
+        .bind(&task.id)
+        .bind(&task.name)
+        .bind(&task.project)
+        .bind(&task.workdir)
+        .bind(&task.sock_path)
+        .bind(task.ttyd_port)
         .bind(now)
         .bind(now)
         .execute(&self.pool)

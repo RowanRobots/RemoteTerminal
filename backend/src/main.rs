@@ -7,7 +7,10 @@ mod runtime;
 use std::sync::Arc;
 use std::time::Duration;
 
-use app::{AppConfig, build_base_state, build_router, hydrate_route_map, reconcile_once};
+use app::{
+    AppConfig, build_base_state, build_router, discover_projects_once, hydrate_route_map,
+    reconcile_once,
+};
 use db::Db;
 use runtime::ShellRuntimeManager;
 use tokio::net::TcpListener;
@@ -26,15 +29,21 @@ async fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(ShellRuntimeManager);
     let state = build_base_state(db, runtime, &config);
     hydrate_route_map(&state).await?;
+    if let Err(err) = discover_projects_once(&state).await {
+        warn!(error = %err, "initial discover failed");
+    }
     if let Err(err) = reconcile_once(&state).await {
         warn!(error = %err, "initial reconcile failed");
     }
 
     let reconcile_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
+            if let Err(err) = discover_projects_once(&reconcile_state).await {
+                warn!(error = %err, "periodic discover failed");
+            }
             if let Err(err) = reconcile_once(&reconcile_state).await {
                 warn!(error = %err, "periodic reconcile failed");
             }
