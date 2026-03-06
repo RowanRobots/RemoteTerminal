@@ -18,6 +18,7 @@
 - `scripts/` 启动、构建、测试脚本
 - `scripts/test_all.sh` 自动测试脚本
 - `docs/ARCHITECTURE.md` 架构文档
+- `docs/PUBLIC_ACCESS_SECURITY.md` 公网安全接入文档（Cloudflare Tunnel + Access + MFA）
 
 ## 运行前依赖
 
