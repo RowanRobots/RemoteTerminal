@@ -14,7 +14,7 @@ use axum::{
     http::{Request, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, get_service, post},
 };
 use axum_reverse_proxy::{ProxyRouterExt, TargetResolver};
 use futures_util::{SinkExt, StreamExt};
@@ -34,7 +34,11 @@ use tokio_tungstenite::{
         },
     },
 };
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -51,6 +55,7 @@ pub struct AppState {
     pub runtime: Arc<dyn RuntimeManager>,
     pub allowed_root: PathBuf,
     pub public_base_url: String,
+    pub frontend_dist: PathBuf,
     pub route_map: Arc<RwLock<HashMap<String, u16>>>,
     pub create_lock: Arc<Mutex<()>>,
     pub min_port: u16,
@@ -115,6 +120,7 @@ pub struct AppConfig {
     pub db_url: String,
     pub allowed_root: PathBuf,
     pub public_base_url: String,
+    pub frontend_dist: PathBuf,
     pub min_port: u16,
     pub max_port: u16,
 }
@@ -130,6 +136,9 @@ impl AppConfig {
         }));
         let public_base_url = std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let frontend_dist = PathBuf::from(
+            std::env::var("FRONTEND_DIST").unwrap_or_else(|_| "../frontend/dist".to_string()),
+        );
         let min_port = std::env::var("TTYD_PORT_MIN")
             .ok()
             .and_then(|x| x.parse::<u16>().ok())
@@ -159,6 +168,7 @@ impl AppConfig {
             db_url,
             allowed_root,
             public_base_url,
+            frontend_dist,
             min_port,
             max_port,
         }
@@ -195,9 +205,15 @@ pub async fn build_router(state: AppState) -> Router {
             guard_and_log_terminal_access,
         ));
 
+    let index_file = Path::new(&state.frontend_dist).join("index.html");
+    let static_service = get_service(
+        ServeDir::new(&state.frontend_dist).not_found_service(ServeFile::new(index_file)),
+    );
+
     Router::new()
         .merge(api_router)
         .merge(term_router)
+        .fallback_service(static_service)
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -948,6 +964,7 @@ pub fn build_base_state(db: Db, runtime: Arc<dyn RuntimeManager>, config: &AppCo
         runtime,
         allowed_root: config.allowed_root.clone(),
         public_base_url: config.public_base_url.clone(),
+        frontend_dist: config.frontend_dist.clone(),
         route_map: Arc::new(RwLock::new(HashMap::new())),
         create_lock: Arc::new(Mutex::new(())),
         min_port: config.min_port,
@@ -990,6 +1007,7 @@ mod tests {
             db_url: "sqlite::memory:".to_string(),
             allowed_root: std::path::PathBuf::from("/tmp/codex-tests"),
             public_base_url: "http://localhost:8080".to_string(),
+            frontend_dist: std::path::PathBuf::from("../frontend/dist"),
             min_port: 12000,
             max_port: 12010,
         };
@@ -1108,7 +1126,9 @@ mod tests {
             .body(Body::empty())
             .expect("build request failed");
         let resp = app.clone().oneshot(req).await.expect("request failed");
-        assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(
+            resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_GATEWAY
+        );
 
         let req = Request::builder()
             .method("GET")

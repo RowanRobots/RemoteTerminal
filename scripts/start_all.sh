@@ -19,16 +19,18 @@ start_if_not_running() {
   sleep 0.5
 }
 
-echo "[mode] dev"
+echo "[mode] prod"
+echo "[build] frontend dist"
+"$ROOT_DIR/scripts/build_frontend.sh" >"$LOG_DIR/frontend-build.log" 2>&1
+
 start_if_not_running "target/debug/backend" "./scripts/start_backend.sh" "$LOG_DIR/backend.log"
-start_if_not_running "vite --host 0.0.0.0 --port 8080" "./scripts/start_frontend.sh" "$LOG_DIR/frontend.log"
 
 echo
-echo "Started (dev mode)."
+echo "Started (prod mode)."
 echo "URL: http://127.0.0.1:8080"
 echo "LAN URL: http://<board-ip>:8080"
 
 echo
 echo "[logs]"
 echo "  $LOG_DIR/backend.log"
-echo "  $LOG_DIR/frontend.log"
+echo "  $LOG_DIR/frontend-build.log"
