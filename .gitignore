@@ -26,15 +26,22 @@ frontend/coverage/
 
 # Backend (Rust)
 backend/target/
+backend/target-prod/
 
 # Local databases and sqlite sidecar files
 data/*.db
 backend/data/*.db
 *.db-shm
 *.db-wal
+var/data/
 
 # Generic caches / temp files
 .cache/
 tmp/
 *.tmp
 *.bak
+
+# Local deployment artifacts
+deploy/systemd/*.local
+deploy/systemd/*.rendered
+.prod-runtime/

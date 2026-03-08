@@ -1,0 +1,25 @@
+[Unit]
+Description=RemoteTerminal backend service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__PROD_CURRENT_DIR__
+Environment=HOME=__APP_HOME__
+Environment=REMOTE_TERMINAL_ENV_FILE=__PROD_ENV_FILE__
+EnvironmentFile=__PROD_ENV_FILE__
+ExecStart=__PROD_RUN_SCRIPT__
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
