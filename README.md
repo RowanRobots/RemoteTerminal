@@ -31,14 +31,11 @@
 
 ## 本地开发
 
+开发环境直接跑源码目录，生产环境不要直接跑源码目录。
+
 1. 启动后端
 ```bash
-cd backend
-source "$HOME/.cargo/env"
-set -a
-source ./.env.local
-set +a
-cargo run
+./scripts/start_backend.sh
 ```
 
 2. 启动前端
@@ -49,7 +46,7 @@ npm run dev
 ```
 
 3. 打开页面
-- `http://<host>:8080`
+- `http://<host>:8080` 或 `backend/.env.local` 中配置的地址
 
 开发模式下：
 - `/api/*` 与 `/term/*` 会由 Vite 代理到后端 `127.0.0.1:8081`
@@ -65,6 +62,51 @@ npm run dev
 - Vue 前端构建（`npm run build`）
 - Vue 前端单测（`npm test`）
 
+建议在开发环境完成测试，不要把测试流程和正式发布混在一起。
+
+## 作为 systemd 常驻服务
+
+仓库内已经提供安装脚本和单元模板，见：
+- `docs/SYSTEMD.md`
+
+先在本机预生成运行文件：
+
+```bash
+./scripts/install_systemd_service.sh --dry-run
+```
+
+正式安装为系统服务：
+
+```bash
+sudo ./scripts/install_systemd_service.sh
+```
+
+生产环境不是直接跑源码目录，而是把运行面发布到仓库内的：
+
+```bash
+.prod-runtime/current
+```
+
+其中包含：
+- `bin/backend`
+- `config/remoteterminal.env`
+- `frontend/dist`
+- `scripts/run_backend.sh`
+- `var/data`
+
+发布脚本会自动完成：
+- 构建前端
+- 构建生产专用后端二进制
+- 发布到 `.prod-runtime/current`
+- 渲染并安装 systemd 服务
+
+发布后可用以下命令检查：
+
+```bash
+systemctl status remoteterminal.service --no-pager -l
+journalctl -u remoteterminal.service -n 50 --no-pager -l
+```
+
 ## 环境变量（后端）
 
 - `BIND_ADDR` 默认 `0.0.0.0:8080`
@@ -75,6 +117,18 @@ npm run dev
 - `TTYD_PORT_MAX` 默认 `10999`
 
 建议本地开发时使用 `backend/.env.local`（已提供示例值）并通过 `source` 加载。
+
+## 推荐流程
+
+开发：
+- 修改源码
+- 用 `./scripts/start_backend.sh` 和 `npm run dev` 调试
+- 用 `./scripts/test_all.sh` 测试
+
+发布：
+- 确认开发验证完成
+- 执行 `sudo ./scripts/install_systemd_service.sh`
+- 检查 `systemctl status remoteterminal.service`
 
 ## API 摘要
 
