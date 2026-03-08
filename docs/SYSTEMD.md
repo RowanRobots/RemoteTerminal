@@ -7,6 +7,7 @@
 
 仓库内已经准备好：
 - `scripts/install_local_ttyd.sh`
+- `scripts/publish_runtime.sh`
 - `scripts/install_systemd_service.sh`
 - `deploy/systemd/remoteterminal.service.template`
 - `deploy/systemd/remoteterminal.env.example`
@@ -26,20 +27,30 @@
 
 ## 安装系统服务
 
-在仓库根目录执行：
+先在仓库根目录执行用户态发布：
 
 ```bash
-sudo ./scripts/install_systemd_service.sh
+./scripts/publish_runtime.sh
 ```
 
 这会完成几件事：
 - 构建源码目录下的 `frontend/dist`
-- 编译生产专用二进制到 `backend/target-prod/debug/backend`
+- 编译生产专用二进制到 `backend/target-prod-user/debug/backend`
 - 发布生产目录到 `.prod-runtime/current`
 - 生成生产环境文件 `.prod-runtime/current/config/remoteterminal.env`
 - 生成生产启动脚本 `.prod-runtime/current/scripts/run_backend.sh`
 - 渲染单元文件 `deploy/systemd/remoteterminal.service.rendered`
-- 安装并启动 `/etc/systemd/system/remoteterminal.service`
+
+再安装或重启系统服务：
+
+```bash
+./scripts/install_systemd_service.sh
+```
+
+这一步只会在真正需要时调用 `sudo`：
+- 安装 `/etc/systemd/system/remoteterminal.service`
+- `systemctl daemon-reload`
+- `systemctl enable --now remoteterminal.service`
 
 默认生产目录都放在仓库内：
 - 运行根目录：`.prod-runtime/current`
@@ -52,11 +63,7 @@ sudo ./scripts/install_systemd_service.sh
 
 ## 仅预生成本地文件
 
-如果你只是想在当前机器先把文件准备好，不立刻调用 `systemctl`：
-
-```bash
-./scripts/install_systemd_service.sh --dry-run
-```
+如果你只是想准备生产运行面，不安装 systemd，执行 `./scripts/publish_runtime.sh` 即可。
 
 ## 安装用户服务
 
@@ -73,8 +80,9 @@ sudo ./scripts/install_systemd_service.sh
 
 1. 拷贝整个仓库。
 2. 安装基础依赖：`codex`、`dtach`、`node/npm`、`rustup/cargo`。
-3. 运行 `sudo ./scripts/install_systemd_service.sh`。
-4. 用下面的命令检查状态：
+3. 运行 `./scripts/publish_runtime.sh`。
+4. 运行 `./scripts/install_systemd_service.sh`。
+5. 用下面的命令检查状态：
 
 ```bash
 systemctl status remoteterminal.service

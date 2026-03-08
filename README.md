@@ -72,13 +72,13 @@ npm run dev
 先在本机预生成运行文件：
 
 ```bash
-./scripts/install_systemd_service.sh --dry-run
+./scripts/publish_runtime.sh
 ```
 
-正式安装为系统服务：
+再安装或重启系统服务：
 
 ```bash
-sudo ./scripts/install_systemd_service.sh
+./scripts/install_systemd_service.sh
 ```
 
 生产环境不是直接跑源码目录，而是把运行面发布到仓库内的：
@@ -98,7 +98,14 @@ sudo ./scripts/install_systemd_service.sh
 - 构建前端
 - 构建生产专用后端二进制
 - 发布到 `.prod-runtime/current`
-- 渲染并安装 systemd 服务
+- 渲染 systemd 服务文件
+
+安装脚本只负责：
+- 安装渲染后的 unit 到 systemd
+- `daemon-reload`
+- `enable --now` 服务
+
+这样源码构建和发布始终由当前用户执行，只有 systemd 安装步骤会触发 `sudo`。
 
 发布后可用以下命令检查：
 
@@ -127,7 +134,8 @@ journalctl -u remoteterminal.service -n 50 --no-pager -l
 
 发布：
 - 确认开发验证完成
-- 执行 `sudo ./scripts/install_systemd_service.sh`
+- 执行 `./scripts/publish_runtime.sh`
+- 再执行 `./scripts/install_systemd_service.sh`
 - 检查 `systemctl status remoteterminal.service`
 
 ## API 摘要

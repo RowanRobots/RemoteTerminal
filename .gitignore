@@ -27,6 +27,7 @@ frontend/coverage/
 # Backend (Rust)
 backend/target/
 backend/target-prod/
+backend/target-prod-user/
 
 # Local databases and sqlite sidecar files
 data/*.db
