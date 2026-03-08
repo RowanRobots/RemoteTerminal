@@ -21,6 +21,20 @@ pub enum RuntimeError {
 
 #[async_trait]
 pub trait RuntimeManager: Send + Sync {
+    async fn start_session(
+        &self,
+        task_id: &str,
+        workdir: &Path,
+        sock_path: &Path,
+    ) -> Result<i64, RuntimeError>;
+
+    async fn start_ttyd(
+        &self,
+        task_id: &str,
+        sock_path: &Path,
+        ttyd_port: u16,
+    ) -> Result<i64, RuntimeError>;
+
     async fn start_task(
         &self,
         task_id: &str,
@@ -34,6 +48,10 @@ pub trait RuntimeManager: Send + Sync {
         dtach_pid: Option<i64>,
         ttyd_pid: Option<i64>,
     ) -> Result<(), RuntimeError>;
+
+    async fn stop_session(&self, dtach_pid: Option<i64>) -> Result<(), RuntimeError>;
+
+    async fn stop_ttyd(&self, ttyd_pid: Option<i64>) -> Result<(), RuntimeError>;
 
     async fn is_pid_alive(&self, pid: i64) -> bool;
 }
@@ -106,13 +124,12 @@ impl ShellRuntimeManager {
 
 #[async_trait]
 impl RuntimeManager for ShellRuntimeManager {
-    async fn start_task(
+    async fn start_session(
         &self,
-        task_id: &str,
+        _task_id: &str,
         workdir: &Path,
         sock_path: &Path,
-        ttyd_port: u16,
-    ) -> Result<RuntimePids, RuntimeError> {
+    ) -> Result<i64, RuntimeError> {
         match std::fs::remove_file(sock_path) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -122,7 +139,7 @@ impl RuntimeManager for ShellRuntimeManager {
         let mut dtach_cmd = Command::new("dtach");
         let workdir_escaped = workdir.to_string_lossy().replace('\'', "'\"'\"'");
         let shell_cmd = format!(
-            "cd '{}' && codex --no-alt-screen; exec bash -i",
+            "export TERM=xterm-256color COLORTERM=truecolor; cd '{}' && codex; exec bash -i",
             workdir_escaped
         );
         dtach_cmd
@@ -152,11 +169,22 @@ impl RuntimeManager for ShellRuntimeManager {
             ));
         };
 
+        Ok(dtach_pid)
+    }
+
+    async fn start_ttyd(
+        &self,
+        task_id: &str,
+        sock_path: &Path,
+        ttyd_port: u16,
+    ) -> Result<i64, RuntimeError> {
         let mut ttyd_cmd = Command::new("ttyd");
         ttyd_cmd
             .arg("-i")
             .arg("127.0.0.1")
             // Allow keyboard input from browser clients.
+            .arg("-T")
+            .arg("xterm-256color")
             .arg("-W")
             .arg("-b")
             .arg(format!("/term/{task_id}"))
@@ -168,21 +196,35 @@ impl RuntimeManager for ShellRuntimeManager {
 
         let ttyd_pid = match self.spawn_background(&mut ttyd_cmd) {
             Ok(pid) => pid,
-            Err(err) => {
-                let _ = self.kill_pid(dtach_pid).await;
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         };
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 
         if !self.is_pid_alive(ttyd_pid).await {
-            let _ = self.kill_pid(dtach_pid).await;
             return Err(RuntimeError::Command(
                 "ttyd process did not stay alive".to_string(),
             ));
         }
 
-        let _ = task_id;
+        Ok(ttyd_pid)
+    }
+
+    async fn start_task(
+        &self,
+        task_id: &str,
+        workdir: &Path,
+        sock_path: &Path,
+        ttyd_port: u16,
+    ) -> Result<RuntimePids, RuntimeError> {
+        let dtach_pid = self.start_session(task_id, workdir, sock_path).await?;
+        let ttyd_pid = match self.start_ttyd(task_id, sock_path, ttyd_port).await {
+            Ok(pid) => pid,
+            Err(err) => {
+                let _ = self.stop_session(Some(dtach_pid)).await;
+                return Err(err);
+            }
+        };
+
         Ok(RuntimePids {
             dtach_pid,
             ttyd_pid,
@@ -194,10 +236,20 @@ impl RuntimeManager for ShellRuntimeManager {
         dtach_pid: Option<i64>,
         ttyd_pid: Option<i64>,
     ) -> Result<(), RuntimeError> {
-        if let Some(pid) = ttyd_pid {
+        let _ = self.stop_ttyd(ttyd_pid).await;
+        let _ = self.stop_session(dtach_pid).await;
+        Ok(())
+    }
+
+    async fn stop_session(&self, dtach_pid: Option<i64>) -> Result<(), RuntimeError> {
+        if let Some(pid) = dtach_pid {
             let _ = self.kill_pid(pid).await;
         }
-        if let Some(pid) = dtach_pid {
+        Ok(())
+    }
+
+    async fn stop_ttyd(&self, ttyd_pid: Option<i64>) -> Result<(), RuntimeError> {
+        if let Some(pid) = ttyd_pid {
             let _ = self.kill_pid(pid).await;
         }
         Ok(())
@@ -249,18 +301,39 @@ pub mod test_support {
 
     #[async_trait]
     impl RuntimeManager for MockRuntimeManager {
-        async fn start_task(
+        async fn start_session(
             &self,
             _task_id: &str,
             _workdir: &Path,
             _sock_path: &Path,
-            _ttyd_port: u16,
-        ) -> Result<RuntimePids, RuntimeError> {
+        ) -> Result<i64, RuntimeError> {
             let dtach = self.next_pid.fetch_add(1, Ordering::SeqCst);
-            let ttyd = self.next_pid.fetch_add(1, Ordering::SeqCst);
             let mut alive = self.alive.lock().expect("lock poisoned");
             alive.insert(dtach);
+            Ok(dtach)
+        }
+
+        async fn start_ttyd(
+            &self,
+            _task_id: &str,
+            _sock_path: &Path,
+            _ttyd_port: u16,
+        ) -> Result<i64, RuntimeError> {
+            let ttyd = self.next_pid.fetch_add(1, Ordering::SeqCst);
+            let mut alive = self.alive.lock().expect("lock poisoned");
             alive.insert(ttyd);
+            Ok(ttyd)
+        }
+
+        async fn start_task(
+            &self,
+            task_id: &str,
+            workdir: &Path,
+            sock_path: &Path,
+            ttyd_port: u16,
+        ) -> Result<RuntimePids, RuntimeError> {
+            let dtach = self.start_session(task_id, workdir, sock_path).await?;
+            let ttyd = self.start_ttyd(task_id, sock_path, ttyd_port).await?;
             Ok(RuntimePids {
                 dtach_pid: dtach,
                 ttyd_pid: ttyd,
@@ -272,10 +345,21 @@ pub mod test_support {
             dtach_pid: Option<i64>,
             ttyd_pid: Option<i64>,
         ) -> Result<(), RuntimeError> {
+            let _ = self.stop_ttyd(ttyd_pid).await;
+            let _ = self.stop_session(dtach_pid).await;
+            Ok(())
+        }
+
+        async fn stop_session(&self, dtach_pid: Option<i64>) -> Result<(), RuntimeError> {
             let mut alive = self.alive.lock().expect("lock poisoned");
             if let Some(pid) = dtach_pid {
                 alive.remove(&pid);
             }
+            Ok(())
+        }
+
+        async fn stop_ttyd(&self, ttyd_pid: Option<i64>) -> Result<(), RuntimeError> {
+            let mut alive = self.alive.lock().expect("lock poisoned");
             if let Some(pid) = ttyd_pid {
                 alive.remove(&pid);
             }

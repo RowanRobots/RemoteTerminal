@@ -7,33 +7,18 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{
-        OriginalUri, Path as AxumPath, Query, State,
-        ws::{Message as AxumWsMessage, WebSocketUpgrade},
-    },
-    http::{Request, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
+    extract::{Path as AxumPath, Query, State},
+    http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, get_service, post},
 };
 use axum_reverse_proxy::{ProxyRouterExt, TargetResolver};
-use futures_util::{SinkExt, StreamExt};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        Message as TungsteniteMessage,
-        client::IntoClientRequest,
-        protocol::frame::{
-            Utf8Bytes as TungsteniteUtf8Bytes,
-            coding::CloseCode as TungsteniteCloseCode,
-        },
-    },
-};
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
@@ -46,7 +31,7 @@ use crate::{
     db::{Db, NewDiscoveredTask, NewTask},
     error::AppError,
     models::{ActionResponse, AuditLog, CreateTaskRequest, Task, TaskStatus, TerminalUrlResponse},
-    runtime::RuntimeManager,
+    runtime::{RuntimeManager, RuntimePids},
 };
 
 #[derive(Clone)]
@@ -196,7 +181,6 @@ pub async fn build_router(state: AppState) -> Router {
     };
 
     let term_router = Router::new()
-        .route("/term/{id}/ws", get(proxy_term_ws))
         .proxy_route("/term/{id}", resolver.clone())
         .proxy_route("/term/{id}/", resolver.clone())
         .proxy_route("/term/{id}/{*rest}", resolver)
@@ -251,11 +235,8 @@ async fn create_task(
     let name = payload.name.unwrap_or_else(|| project.clone());
     let sock_path = format!("/tmp/codex-{id}.sock");
 
-    let runtime = state
-        .runtime
-        .start_task(&id, &workdir, Path::new(&sock_path), port)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let runtime =
+        start_full_task_runtime(&state, &id, &workdir, Path::new(&sock_path), port).await?;
 
     let task = match state
         .db
@@ -307,28 +288,7 @@ async fn list_tasks(State(state): State<AppState>) -> Result<Json<Vec<Task>>, Ap
             continue;
         }
 
-        if !is_task_runtime_alive(&state, task).await {
-            task.status = TaskStatus::Error;
-            let _ = state
-                .db
-                .update_runtime(&task.id, None, None, TaskStatus::Error)
-                .await;
-            state
-                .route_map
-                .write()
-                .expect("route map lock poisoned")
-                .remove(&task.id);
-            warn!(task_id = %task.id, "runtime process appears down, marking task as error");
-            continue;
-        }
-
-        if let Ok(port) = u16::try_from(task.ttyd_port) {
-            state
-                .route_map
-                .write()
-                .expect("route map lock poisoned")
-                .insert(task.id.clone(), port);
-        }
+        *task = refresh_running_task(&state, task.clone()).await?;
     }
 
     Ok(Json(tasks))
@@ -451,6 +411,8 @@ async fn get_terminal_url(
         )));
     }
 
+    let task = ensure_task_running(&state, task).await?;
+
     let path = format!("/term/{}/", task.id);
     let url = format!("{}{}", state.public_base_url.trim_end_matches('/'), path);
 
@@ -466,111 +428,6 @@ async fn get_terminal_url(
     }))
 }
 
-async fn proxy_term_ws(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    OriginalUri(original_uri): OriginalUri,
-    headers: axum::http::HeaderMap,
-    mut ws: WebSocketUpgrade,
-) -> Result<Response, AppError> {
-    let port = state
-        .route_map
-        .read()
-        .expect("route map lock poisoned")
-        .get(&id)
-        .copied()
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
-
-    let selected_subprotocol = headers
-        .get(SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next().map(str::trim))
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string);
-
-    if let Some(subprotocol) = selected_subprotocol.clone() {
-        ws = ws.protocols([subprotocol]);
-    }
-
-    let mut upstream_url = format!("ws://127.0.0.1:{port}/term/{id}/ws");
-    if let Some(query) = original_uri.query() {
-        upstream_url.push('?');
-        upstream_url.push_str(query);
-    }
-
-    Ok(ws.on_upgrade(move |downstream| async move {
-        let mut upstream_req = match upstream_url.clone().into_client_request() {
-            Ok(req) => req,
-            Err(_) => return,
-        };
-        if let Some(subprotocol) = selected_subprotocol {
-            if let Ok(header_value) = subprotocol.parse() {
-                upstream_req
-                    .headers_mut()
-                    .insert(SEC_WEBSOCKET_PROTOCOL, header_value);
-            }
-        }
-
-        let (upstream, _) = match connect_async(upstream_req).await {
-            Ok(pair) => pair,
-            Err(_) => return,
-        };
-
-        let (mut down_tx, mut down_rx) = downstream.split();
-        let (mut up_tx, mut up_rx) = upstream.split();
-
-        let downstream_to_upstream = async {
-            while let Some(msg) = down_rx.next().await {
-                let Ok(msg) = msg else { break };
-                let mapped = match msg {
-                    AxumWsMessage::Text(t) => TungsteniteMessage::Text(t.to_string().into()),
-                    AxumWsMessage::Binary(b) => TungsteniteMessage::Binary(b),
-                    AxumWsMessage::Ping(b) => TungsteniteMessage::Ping(b),
-                    AxumWsMessage::Pong(b) => TungsteniteMessage::Pong(b),
-                    AxumWsMessage::Close(cf) => {
-                        let close = cf.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                            code: TungsteniteCloseCode::from(cf.code),
-                            reason: TungsteniteUtf8Bytes::from(cf.reason.to_string()),
-                        });
-                        TungsteniteMessage::Close(close)
-                    }
-                };
-                if up_tx.send(mapped).await.is_err() {
-                    break;
-                }
-            }
-        };
-
-        let upstream_to_downstream = async {
-            while let Some(msg) = up_rx.next().await {
-                let Ok(msg) = msg else { break };
-                let mapped = match msg {
-                    TungsteniteMessage::Text(t) => AxumWsMessage::Text(t.to_string().into()),
-                    TungsteniteMessage::Binary(b) => AxumWsMessage::Binary(b),
-                    TungsteniteMessage::Ping(b) => AxumWsMessage::Ping(b),
-                    TungsteniteMessage::Pong(b) => AxumWsMessage::Pong(b),
-                    TungsteniteMessage::Close(cf) => {
-                        let close = cf.map(|cf| axum::extract::ws::CloseFrame {
-                            code: cf.code.into(),
-                            reason: cf.reason.to_string().into(),
-                        });
-                        AxumWsMessage::Close(close)
-                    }
-                    TungsteniteMessage::Frame(_) => continue,
-                };
-                if down_tx.send(mapped).await.is_err() {
-                    break;
-                }
-            }
-        };
-
-        tokio::select! {
-            _ = downstream_to_upstream => {}
-            _ = upstream_to_downstream => {}
-        }
-    }))
-}
-
 async fn list_logs(
     State(state): State<AppState>,
     Query(query): Query<ListLogsQuery>,
@@ -582,19 +439,8 @@ async fn list_logs(
 }
 
 async fn ensure_task_running(state: &AppState, task: Task) -> Result<Task, AppError> {
-    if task.status == TaskStatus::Running && is_task_runtime_alive(state, &task).await {
-        if let Ok(port) = u16::try_from(task.ttyd_port) {
-            state
-                .route_map
-                .write()
-                .expect("route map lock poisoned")
-                .insert(task.id.clone(), port);
-        }
-        return Ok(task);
-    }
-
     if task.status == TaskStatus::Running {
-        let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
+        return refresh_running_task(state, task).await;
     }
 
     std::fs::create_dir_all(&task.workdir)?;
@@ -602,16 +448,14 @@ async fn ensure_task_running(state: &AppState, task: Task) -> Result<Task, AppEr
     let port = u16::try_from(task.ttyd_port)
         .map_err(|_| AppError::Internal("invalid ttyd port in database".to_string()))?;
 
-    let runtime = state
-        .runtime
-        .start_task(
-            &task.id,
-            Path::new(&task.workdir),
-            Path::new(&task.sock_path),
-            port,
-        )
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let runtime = start_full_task_runtime(
+        state,
+        &task.id,
+        Path::new(&task.workdir),
+        Path::new(&task.sock_path),
+        port,
+    )
+    .await?;
 
     state
         .db
@@ -641,16 +485,128 @@ async fn ensure_task_running(state: &AppState, task: Task) -> Result<Task, AppEr
         .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
 }
 
-async fn is_task_runtime_alive(state: &AppState, task: &Task) -> bool {
-    let dtach_alive = match task.dtach_pid {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeHealth {
+    Healthy,
+    SessionOnly,
+    Down,
+}
+
+async fn session_alive(state: &AppState, task: &Task) -> bool {
+    match task.dtach_pid {
         Some(pid) => state.runtime.is_pid_alive(pid).await,
         None => false,
-    };
-    let ttyd_alive = match task.ttyd_pid {
+    }
+}
+
+async fn ttyd_alive(state: &AppState, task: &Task) -> bool {
+    match task.ttyd_pid {
         Some(pid) => state.runtime.is_pid_alive(pid).await,
         None => false,
-    };
-    dtach_alive && ttyd_alive
+    }
+}
+
+async fn runtime_health(state: &AppState, task: &Task) -> RuntimeHealth {
+    if !session_alive(state, task).await {
+        return RuntimeHealth::Down;
+    }
+    if ttyd_alive(state, task).await {
+        RuntimeHealth::Healthy
+    } else {
+        RuntimeHealth::SessionOnly
+    }
+}
+
+async fn restart_ttyd(state: &AppState, task: &Task) -> Result<Task, AppError> {
+    let port = u16::try_from(task.ttyd_port)
+        .map_err(|_| AppError::Internal("invalid ttyd port in database".to_string()))?;
+
+    let _ = state.runtime.stop_ttyd(task.ttyd_pid).await;
+
+    let ttyd_pid = state
+        .runtime
+        .start_ttyd(&task.id, Path::new(&task.sock_path), port)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    state
+        .db
+        .update_runtime(
+            &task.id,
+            task.dtach_pid,
+            Some(ttyd_pid),
+            TaskStatus::Running,
+        )
+        .await?;
+
+    state
+        .route_map
+        .write()
+        .expect("route map lock poisoned")
+        .insert(task.id.clone(), port);
+
+    let _ = state
+        .db
+        .insert_log(
+            Some(&task.id),
+            "ttyd_restart",
+            "ttyd restarted and reattached",
+        )
+        .await;
+
+    state
+        .db
+        .get_task(&task.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
+}
+
+async fn start_full_task_runtime(
+    state: &AppState,
+    task_id: &str,
+    workdir: &Path,
+    sock_path: &Path,
+    port: u16,
+) -> Result<RuntimePids, AppError> {
+    state
+        .runtime
+        .start_task(task_id, workdir, sock_path, port)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+async fn refresh_running_task(state: &AppState, task: Task) -> Result<Task, AppError> {
+    match runtime_health(state, &task).await {
+        RuntimeHealth::Healthy => {
+            if let Ok(port) = u16::try_from(task.ttyd_port) {
+                state
+                    .route_map
+                    .write()
+                    .expect("route map lock poisoned")
+                    .insert(task.id.clone(), port);
+            }
+            Ok(task)
+        }
+        RuntimeHealth::SessionOnly => restart_ttyd(state, &task).await,
+        RuntimeHealth::Down => {
+            let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
+            let _ = state
+                .db
+                .update_runtime(&task.id, None, None, TaskStatus::Error)
+                .await;
+            state
+                .route_map
+                .write()
+                .expect("route map lock poisoned")
+                .remove(&task.id);
+            warn!(task_id = %task.id, "dtach session appears down, marking task as error");
+            state
+                .db
+                .get_task(&task.id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
+        }
+    }
 }
 
 pub async fn reconcile_once(state: &AppState) -> Result<(), AppError> {
@@ -664,33 +620,47 @@ pub async fn reconcile_once(state: &AppState) -> Result<(), AppError> {
             continue;
         }
 
-        if is_task_runtime_alive(state, &task).await {
-            if let Ok(port) = u16::try_from(task.ttyd_port) {
-                healthy_routes.insert(task.id.clone(), port);
-                healthy_ids.insert(task.id.clone());
-                healthy_socks.insert(task.sock_path.clone());
-            } else {
+        match runtime_health(state, &task).await {
+            RuntimeHealth::Healthy => {
+                if let Ok(port) = u16::try_from(task.ttyd_port) {
+                    healthy_routes.insert(task.id.clone(), port);
+                    healthy_ids.insert(task.id.clone());
+                    healthy_socks.insert(task.sock_path.clone());
+                } else {
+                    let _ = state
+                        .db
+                        .update_runtime(&task.id, None, None, TaskStatus::Error)
+                        .await;
+                }
+            }
+            RuntimeHealth::SessionOnly => match restart_ttyd(state, &task).await {
+                Ok(updated) => {
+                    if let Ok(port) = u16::try_from(updated.ttyd_port) {
+                        healthy_routes.insert(updated.id.clone(), port);
+                        healthy_ids.insert(updated.id.clone());
+                        healthy_socks.insert(updated.sock_path.clone());
+                    }
+                }
+                Err(err) => {
+                    warn!(task_id = %task.id, error = %err, "failed to restart ttyd during reconcile");
+                }
+            },
+            RuntimeHealth::Down => {
+                let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
                 let _ = state
                     .db
                     .update_runtime(&task.id, None, None, TaskStatus::Error)
                     .await;
+                let _ = state
+                    .db
+                    .insert_log(
+                        Some(&task.id),
+                        "reconcile_mark_error",
+                        "dtach session down, marked error",
+                    )
+                    .await;
             }
-            continue;
         }
-
-        let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
-        let _ = state
-            .db
-            .update_runtime(&task.id, None, None, TaskStatus::Error)
-            .await;
-        let _ = state
-            .db
-            .insert_log(
-                Some(&task.id),
-                "reconcile_mark_error",
-                "runtime down, marked error",
-            )
-            .await;
     }
 
     {
@@ -732,7 +702,12 @@ pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
     projects.dedup();
 
     for project in projects {
-        if state.db.get_latest_task_by_project(&project).await?.is_some() {
+        if state
+            .db
+            .get_latest_task_by_project(&project)
+            .await?
+            .is_some()
+        {
             continue;
         }
 
@@ -994,11 +969,20 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    use crate::{db::Db, runtime::test_support::MockRuntimeManager};
+    use std::sync::Arc;
+
+    use crate::{
+        db::Db,
+        runtime::{RuntimeManager, test_support::MockRuntimeManager},
+    };
 
     use super::{AppConfig, build_base_state, build_router, hydrate_route_map};
 
     async fn test_router() -> Router {
+        test_router_with_runtime().await.0
+    }
+
+    async fn test_router_with_runtime() -> (Router, Arc<MockRuntimeManager>) {
         let db = Db::connect("sqlite::memory:")
             .await
             .expect("db connect failed");
@@ -1013,9 +997,10 @@ mod tests {
         };
         std::fs::create_dir_all(&cfg.allowed_root).expect("mkdir failed");
 
-        let state = build_base_state(db, std::sync::Arc::new(MockRuntimeManager::new()), &cfg);
+        let runtime = Arc::new(MockRuntimeManager::new());
+        let state = build_base_state(db, runtime.clone(), &cfg);
         hydrate_route_map(&state).await.expect("hydrate failed");
-        build_router(state).await
+        (build_router(state).await, runtime)
     }
 
     async fn create_task_and_get_id_with_project(app: &Router, project: &str) -> String {
@@ -1126,9 +1111,7 @@ mod tests {
             .body(Body::empty())
             .expect("build request failed");
         let resp = app.clone().oneshot(req).await.expect("request failed");
-        assert!(
-            resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_GATEWAY
-        );
+        assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_GATEWAY);
 
         let req = Request::builder()
             .method("GET")
@@ -1153,5 +1136,73 @@ mod tests {
             .expect("build request failed");
         let resp = app.oneshot(req).await.expect("request failed");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn terminal_url_restarts_only_ttyd_when_session_survives() {
+        let (app, runtime) = test_router_with_runtime().await;
+        let task_id = create_task_and_get_id(&app).await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/tasks/{task_id}"))
+            .body(Body::empty())
+            .expect("build request failed");
+        let resp = app.clone().oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("read body failed")
+            .to_bytes();
+        let before: serde_json::Value = serde_json::from_slice(&body).expect("invalid json");
+        let dtach_pid = before
+            .get("dtach_pid")
+            .and_then(|v| v.as_i64())
+            .expect("missing dtach pid");
+        let ttyd_pid = before
+            .get("ttyd_pid")
+            .and_then(|v| v.as_i64())
+            .expect("missing ttyd pid");
+
+        runtime
+            .stop_ttyd(Some(ttyd_pid))
+            .await
+            .expect("stop ttyd failed");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/tasks/{task_id}/terminal-url"))
+            .body(Body::empty())
+            .expect("build request failed");
+        let resp = app.clone().oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/tasks/{task_id}"))
+            .body(Body::empty())
+            .expect("build request failed");
+        let resp = app.oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("read body failed")
+            .to_bytes();
+        let after: serde_json::Value = serde_json::from_slice(&body).expect("invalid json");
+        let after_dtach = after
+            .get("dtach_pid")
+            .and_then(|v| v.as_i64())
+            .expect("missing dtach pid");
+        let after_ttyd = after
+            .get("ttyd_pid")
+            .and_then(|v| v.as_i64())
+            .expect("missing ttyd pid");
+
+        assert_eq!(after_dtach, dtach_pid);
+        assert_ne!(after_ttyd, ttyd_pid);
     }
 }
