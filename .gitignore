@@ -34,6 +34,7 @@ backend/data/*.db
 *.db-shm
 *.db-wal
 var/data/
+var/data/*.db
 
 # Generic caches / temp files
 .cache/

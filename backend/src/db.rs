@@ -123,7 +123,10 @@ impl Db {
             .ok_or(sqlx::Error::RowNotFound)
     }
 
-    pub async fn insert_discovered_task(&self, task: NewDiscoveredTask) -> Result<Task, sqlx::Error> {
+    pub async fn insert_discovered_task(
+        &self,
+        task: NewDiscoveredTask,
+    ) -> Result<Task, sqlx::Error> {
         let now = Utc::now();
         sqlx::query(
             r#"
