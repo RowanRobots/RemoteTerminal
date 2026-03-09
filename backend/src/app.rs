@@ -444,7 +444,7 @@ fn task_workdir(state: &AppState, project: &str) -> PathBuf {
 }
 
 fn task_sock_path(project: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/remote_terminal/{project}.sock"))
+    PathBuf::from(format!("/tmp/codex-{project}.sock"))
 }
 
 fn dtach_launch_command(workdir: &Path, sock_path: &Path) -> String {
@@ -703,7 +703,7 @@ pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
 async fn cleanup_orphan_processes(keep_ids: &HashSet<String>, keep_socks: &HashSet<String>) {
     let dtach_re = Regex::new(r"^\s*(\d+)\s+.*\bdtach\b.*\s-n\s+(\S+)").expect("regex compile");
     let mut dtach_by_sock: HashMap<String, Vec<i64>> = HashMap::new();
-    for line in pgrep_lines("dtach -n /tmp/remote_terminal/").await {
+    for line in pgrep_lines("dtach -n /tmp/codex-").await {
         if let Some(caps) = dtach_re.captures(&line) {
             let pid = caps
                 .get(1)
