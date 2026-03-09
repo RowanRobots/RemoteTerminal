@@ -13,6 +13,8 @@ pub struct Db {
     pool: SqlitePool,
 }
 
+const LOG_RETENTION_LIMIT: i64 = 100;
+
 impl Db {
     pub async fn connect(db_url: &str) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::from_str(db_url)?
@@ -64,6 +66,21 @@ impl Db {
         .bind(Utc::now())
         .execute(&self.pool)
         .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM audit_logs
+            WHERE id NOT IN (
+                SELECT id FROM audit_logs
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            "#,
+        )
+        .bind(LOG_RETENTION_LIMIT)
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -91,5 +108,28 @@ impl Db {
         };
 
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Db, LOG_RETENTION_LIMIT};
+
+    #[tokio::test]
+    async fn insert_log_keeps_only_recent_limit() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("db connect failed");
+
+        for idx in 0..(LOG_RETENTION_LIMIT + 5) {
+            db.insert_log(Some("demo"), "test", &format!("log-{idx}"))
+                .await
+                .expect("insert log failed");
+        }
+
+        let logs = db.list_logs(None, 500).await.expect("list logs failed");
+        assert_eq!(logs.len() as i64, LOG_RETENTION_LIMIT);
+        assert_eq!(logs.first().and_then(|log| log.detail.as_deref()), Some("log-104"));
+        assert_eq!(logs.last().and_then(|log| log.detail.as_deref()), Some("log-5"));
     }
 }

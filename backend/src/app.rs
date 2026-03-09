@@ -930,6 +930,7 @@ mod tests {
     use tower::ServiceExt;
 
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
         db::Db,
@@ -937,6 +938,8 @@ mod tests {
     };
 
     use super::{AppConfig, build_base_state, build_router, hydrate_route_map};
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
     async fn test_router() -> Router {
         test_router_with_runtime().await.0
@@ -946,10 +949,14 @@ mod tests {
         let db = Db::connect("sqlite::memory:")
             .await
             .expect("db connect failed");
+        let test_root = std::env::temp_dir().join(format!(
+            "codex-tests-{}",
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
         let cfg = AppConfig {
             bind_addr: "127.0.0.1:0".to_string(),
             db_url: "sqlite::memory:".to_string(),
-            allowed_root: std::path::PathBuf::from("/tmp/codex-tests"),
+            allowed_root: test_root,
             public_base_url: "http://localhost:8080".to_string(),
             frontend_dist: std::path::PathBuf::from("../frontend/dist"),
             min_port: 12000,
@@ -1163,7 +1170,26 @@ mod tests {
         let app = test_router().await;
         let task_id = create_task_and_get_id_with_project(&app, "remove-me").await;
 
-        std::fs::remove_dir_all("/tmp/codex-tests/remove-me").expect("remove project dir failed");
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/tasks/{task_id}"))
+            .body(Body::empty())
+            .expect("build request failed");
+        let resp = app.clone().oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("read body failed")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("invalid json");
+        let workdir = value
+            .get("workdir")
+            .and_then(|item| item.as_str())
+            .expect("missing workdir");
+
+        std::fs::remove_dir_all(workdir).expect("remove project dir failed");
 
         let req = Request::builder()
             .method("GET")
