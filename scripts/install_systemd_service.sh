@@ -56,13 +56,23 @@ if [[ "$INSTALL_MODE" == "user" ]]; then
   mkdir -p "$USER_UNIT_DIR"
   install -m 0644 "$UNIT_RENDERED" "$USER_UNIT_DIR/$SERVICE_NAME.service"
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE_NAME.service"
+  systemctl --user enable "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+  if systemctl --user is-active --quiet "$SERVICE_NAME.service"; then
+    systemctl --user restart "$SERVICE_NAME.service"
+  else
+    systemctl --user start "$SERVICE_NAME.service"
+  fi
   echo "[ok] user service installed: $SERVICE_NAME.service"
   exit 0
 fi
 
 sudo install -m 0644 "$UNIT_RENDERED" "/etc/systemd/system/$SERVICE_NAME.service"
 sudo systemctl daemon-reload
-sudo systemctl enable --now "$SERVICE_NAME.service"
+sudo systemctl enable "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+if sudo systemctl is-active --quiet "$SERVICE_NAME.service"; then
+  sudo systemctl restart "$SERVICE_NAME.service"
+else
+  sudo systemctl start "$SERVICE_NAME.service"
+fi
 
 echo "[ok] system service installed: $SERVICE_NAME.service"
