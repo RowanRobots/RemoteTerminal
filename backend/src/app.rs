@@ -39,10 +39,9 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::{
-    db::{Db, NewDiscoveredTask, NewTask},
+    db::Db,
     error::AppError,
     models::{ActionResponse, AuditLog, CreateTaskRequest, Task, TaskStatus, TerminalUrlResponse},
     runtime::{RuntimeManager, RuntimePids},
@@ -184,7 +183,7 @@ pub async fn build_router(state: AppState) -> Router {
     let api_router = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/tasks", post(create_task).get(list_tasks))
-        .route("/api/tasks/{id}", get(get_task).delete(delete_task))
+        .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}/start", post(start_task))
         .route("/api/tasks/{id}/stop", post(stop_task))
         .route("/api/tasks/{id}/terminal-url", get(get_terminal_url))
@@ -229,66 +228,17 @@ async fn create_task(
     let _guard = state.create_lock.lock().await;
 
     let project = validate_project(&payload.project)?;
-    let workdir = state.allowed_root.join(&project);
+    let workdir = task_workdir(&state, &project);
     std::fs::create_dir_all(&workdir)?;
 
-    if let Some(existing) = state.db.get_latest_task_by_project(&project).await? {
-        let task = ensure_task_running(&state, existing).await?;
-        let _ = state
-            .db
-            .insert_log(
-                Some(&task.id),
-                "create_reuse",
-                &format!("reuse existing task for project={}", task.project),
-            )
-            .await;
-        return Ok(Json(task));
-    }
-
-    let port = allocate_port(&state).await?;
-    let id = Uuid::new_v4().to_string();
-    let name = payload.name.unwrap_or_else(|| project.clone());
-    let sock_path = format!("/tmp/codex-{id}.sock");
-
-    let runtime =
-        start_full_task_runtime(&state, &id, &workdir, Path::new(&sock_path), port).await?;
-
-    let task = match state
-        .db
-        .insert_task(NewTask {
-            id: id.clone(),
-            name,
-            project,
-            workdir: workdir.to_string_lossy().to_string(),
-            sock_path: sock_path.clone(),
-            ttyd_port: i64::from(port),
-            dtach_pid: runtime.dtach_pid,
-            ttyd_pid: runtime.ttyd_pid,
-        })
-        .await
-    {
-        Ok(task) => task,
-        Err(err) => {
-            let _ = state
-                .runtime
-                .stop_task(Some(runtime.dtach_pid), Some(runtime.ttyd_pid))
-                .await;
-            return Err(AppError::Internal(err.to_string()));
-        }
-    };
-
-    state
-        .route_map
-        .write()
-        .expect("route map lock poisoned")
-        .insert(id.clone(), port);
+    let task = ensure_task_running(&state, &project).await?;
 
     let _ = state
         .db
         .insert_log(
-            Some(&id),
+            Some(&project),
             "create",
-            &format!("created task for project={}", task.project),
+            &format!("ensured project directory={}", task.project),
         )
         .await;
 
@@ -296,16 +246,10 @@ async fn create_task(
 }
 
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Vec<Task>>, AppError> {
-    let mut tasks = state.db.list_tasks().await?;
-
-    for task in &mut tasks {
-        if task.status != TaskStatus::Running {
-            continue;
-        }
-
-        *task = refresh_running_task(&state, task.clone()).await?;
+    let mut tasks = Vec::new();
+    for project in discover_projects(&state)? {
+        tasks.push(inspect_task(&state, &project).await?);
     }
-
     Ok(Json(tasks))
 }
 
@@ -313,11 +257,8 @@ async fn get_task(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Task>, AppError> {
-    let task = state
-        .db
-        .get_task(&id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
+    let project = validate_project(&id)?;
+    let task = inspect_task(&state, &project).await?;
     Ok(Json(task))
 }
 
@@ -325,13 +266,8 @@ async fn start_task(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Task>, AppError> {
-    let task = state
-        .db
-        .get_task(&id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
-
-    let updated = ensure_task_running(&state, task).await?;
+    let project = validate_project(&id)?;
+    let updated = ensure_task_running(&state, &project).await?;
     Ok(Json(updated))
 }
 
@@ -339,11 +275,8 @@ async fn stop_task(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ActionResponse>, AppError> {
-    let task = state
-        .db
-        .get_task(&id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
+    let project = validate_project(&id)?;
+    let task = inspect_task(&state, &project).await?;
 
     state
         .runtime
@@ -352,19 +285,14 @@ async fn stop_task(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     state
-        .db
-        .update_runtime(&task.id, None, None, TaskStatus::Stopped)
-        .await?;
-
-    state
         .route_map
         .write()
         .expect("route map lock poisoned")
-        .remove(&task.id);
+        .remove(&project);
 
     let _ = state
         .db
-        .insert_log(Some(&task.id), "stop", "task stopped")
+        .insert_log(Some(&project), "stop", "task stopped")
         .await;
 
     Ok(Json(ActionResponse {
@@ -373,60 +301,12 @@ async fn stop_task(
     }))
 }
 
-async fn delete_task(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<ActionResponse>, AppError> {
-    let task = state
-        .db
-        .get_task(&id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
-
-    if task.status == TaskStatus::Running {
-        state
-            .runtime
-            .stop_task(task.dtach_pid, task.ttyd_pid)
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-    }
-
-    state.db.delete_task(&id).await?;
-    state
-        .route_map
-        .write()
-        .expect("route map lock poisoned")
-        .remove(&id);
-
-    let _ = state
-        .db
-        .insert_log(Some(&id), "delete", "task deleted")
-        .await;
-
-    Ok(Json(ActionResponse {
-        ok: true,
-        message: "deleted".to_string(),
-    }))
-}
-
 async fn get_terminal_url(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TerminalUrlResponse>, AppError> {
-    let task = state
-        .db
-        .get_task(&id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {id} not found")))?;
-
-    if task.status != TaskStatus::Running {
-        return Err(AppError::Conflict(format!(
-            "task {} is not running",
-            task.id
-        )));
-    }
-
-    let task = ensure_task_running(&state, task).await?;
+    let project = validate_project(&id)?;
+    let task = ensure_task_running(&state, &project).await?;
 
     let path = format!("/term/{}/", task.id);
     let url = format!("{}{}", state.public_base_url.trim_end_matches('/'), path);
@@ -559,244 +439,24 @@ async fn list_logs(
     Ok(Json(logs))
 }
 
-async fn ensure_task_running(state: &AppState, task: Task) -> Result<Task, AppError> {
-    if task.status == TaskStatus::Running {
-        return refresh_running_task(state, task).await;
-    }
+fn task_workdir(state: &AppState, project: &str) -> PathBuf {
+    state.allowed_root.join(project)
+}
 
-    std::fs::create_dir_all(&task.workdir)?;
+fn task_sock_path(project: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/codex-{project}.sock"))
+}
 
-    let port = u16::try_from(task.ttyd_port)
-        .map_err(|_| AppError::Internal("invalid ttyd port in database".to_string()))?;
-
-    let runtime = start_full_task_runtime(
-        state,
-        &task.id,
-        Path::new(&task.workdir),
-        Path::new(&task.sock_path),
-        port,
+fn dtach_launch_command(workdir: &Path, sock_path: &Path) -> String {
+    let workdir_escaped = workdir.to_string_lossy().replace('\'', "'\"'\"'");
+    format!(
+        "dtach -n {} bash -lc \"export TERM=xterm-256color COLORTERM=truecolor; cd '{}' && codex; exec bash -i\"",
+        sock_path.to_string_lossy(),
+        workdir_escaped
     )
-    .await?;
-
-    state
-        .db
-        .update_runtime(
-            &task.id,
-            Some(runtime.dtach_pid),
-            Some(runtime.ttyd_pid),
-            TaskStatus::Running,
-        )
-        .await?;
-
-    state
-        .route_map
-        .write()
-        .expect("route map lock poisoned")
-        .insert(task.id.clone(), port);
-
-    let _ = state
-        .db
-        .insert_log(Some(&task.id), "start", "task started")
-        .await;
-
-    state
-        .db
-        .get_task(&task.id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeHealth {
-    Healthy,
-    SessionOnly,
-    Down,
-}
-
-async fn session_alive(state: &AppState, task: &Task) -> bool {
-    match task.dtach_pid {
-        Some(pid) => state.runtime.is_pid_alive(pid).await,
-        None => false,
-    }
-}
-
-async fn ttyd_alive(state: &AppState, task: &Task) -> bool {
-    match task.ttyd_pid {
-        Some(pid) => state.runtime.is_pid_alive(pid).await,
-        None => false,
-    }
-}
-
-async fn runtime_health(state: &AppState, task: &Task) -> RuntimeHealth {
-    if !session_alive(state, task).await {
-        return RuntimeHealth::Down;
-    }
-    if ttyd_alive(state, task).await {
-        RuntimeHealth::Healthy
-    } else {
-        RuntimeHealth::SessionOnly
-    }
-}
-
-async fn restart_ttyd(state: &AppState, task: &Task) -> Result<Task, AppError> {
-    let port = u16::try_from(task.ttyd_port)
-        .map_err(|_| AppError::Internal("invalid ttyd port in database".to_string()))?;
-
-    let _ = state.runtime.stop_ttyd(task.ttyd_pid).await;
-
-    let ttyd_pid = state
-        .runtime
-        .start_ttyd(&task.id, Path::new(&task.sock_path), port)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    state
-        .db
-        .update_runtime(
-            &task.id,
-            task.dtach_pid,
-            Some(ttyd_pid),
-            TaskStatus::Running,
-        )
-        .await?;
-
-    state
-        .route_map
-        .write()
-        .expect("route map lock poisoned")
-        .insert(task.id.clone(), port);
-
-    let _ = state
-        .db
-        .insert_log(
-            Some(&task.id),
-            "ttyd_restart",
-            "ttyd restarted and reattached",
-        )
-        .await;
-
-    state
-        .db
-        .get_task(&task.id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
-}
-
-async fn start_full_task_runtime(
-    state: &AppState,
-    task_id: &str,
-    workdir: &Path,
-    sock_path: &Path,
-    port: u16,
-) -> Result<RuntimePids, AppError> {
-    state
-        .runtime
-        .start_task(task_id, workdir, sock_path, port)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
-}
-
-async fn refresh_running_task(state: &AppState, task: Task) -> Result<Task, AppError> {
-    match runtime_health(state, &task).await {
-        RuntimeHealth::Healthy => {
-            if let Ok(port) = u16::try_from(task.ttyd_port) {
-                state
-                    .route_map
-                    .write()
-                    .expect("route map lock poisoned")
-                    .insert(task.id.clone(), port);
-            }
-            Ok(task)
-        }
-        RuntimeHealth::SessionOnly => restart_ttyd(state, &task).await,
-        RuntimeHealth::Down => {
-            let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
-            let _ = state
-                .db
-                .update_runtime(&task.id, None, None, TaskStatus::Error)
-                .await;
-            state
-                .route_map
-                .write()
-                .expect("route map lock poisoned")
-                .remove(&task.id);
-            warn!(task_id = %task.id, "dtach session appears down, marking task as error");
-            state
-                .db
-                .get_task(&task.id)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("task {} not found", task.id)))
-        }
-    }
-}
-
-pub async fn reconcile_once(state: &AppState) -> Result<(), AppError> {
-    let tasks = state.db.list_tasks().await?;
-    let mut healthy_routes = HashMap::new();
-    let mut healthy_ids = HashSet::new();
-    let mut healthy_socks = HashSet::new();
-
-    for task in tasks {
-        if task.status != TaskStatus::Running {
-            continue;
-        }
-
-        match runtime_health(state, &task).await {
-            RuntimeHealth::Healthy => {
-                if let Ok(port) = u16::try_from(task.ttyd_port) {
-                    healthy_routes.insert(task.id.clone(), port);
-                    healthy_ids.insert(task.id.clone());
-                    healthy_socks.insert(task.sock_path.clone());
-                } else {
-                    let _ = state
-                        .db
-                        .update_runtime(&task.id, None, None, TaskStatus::Error)
-                        .await;
-                }
-            }
-            RuntimeHealth::SessionOnly => match restart_ttyd(state, &task).await {
-                Ok(updated) => {
-                    if let Ok(port) = u16::try_from(updated.ttyd_port) {
-                        healthy_routes.insert(updated.id.clone(), port);
-                        healthy_ids.insert(updated.id.clone());
-                        healthy_socks.insert(updated.sock_path.clone());
-                    }
-                }
-                Err(err) => {
-                    warn!(task_id = %task.id, error = %err, "failed to restart ttyd during reconcile");
-                }
-            },
-            RuntimeHealth::Down => {
-                let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
-                let _ = state
-                    .db
-                    .update_runtime(&task.id, None, None, TaskStatus::Error)
-                    .await;
-                let _ = state
-                    .db
-                    .insert_log(
-                        Some(&task.id),
-                        "reconcile_mark_error",
-                        "dtach session down, marked error",
-                    )
-                    .await;
-            }
-        }
-    }
-
-    {
-        let mut route_map = state.route_map.write().expect("route map lock poisoned");
-        route_map.clear();
-        for (id, port) in healthy_routes {
-            route_map.insert(id, port);
-        }
-    }
-
-    cleanup_orphan_processes(&healthy_ids, &healthy_socks).await;
-    Ok(())
-}
-
-pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
+fn discover_projects(state: &AppState) -> Result<Vec<String>, AppError> {
     std::fs::create_dir_all(&state.allowed_root)?;
 
     let read_dir = std::fs::read_dir(&state.allowed_root)?;
@@ -821,44 +481,222 @@ pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
 
     projects.sort();
     projects.dedup();
+    Ok(projects)
+}
 
-    for project in projects {
-        if state
-            .db
-            .get_latest_task_by_project(&project)
-            .await?
-            .is_some()
-        {
-            continue;
-        }
-
-        let port = allocate_port(state).await?;
-        let id = Uuid::new_v4().to_string();
-        let workdir = state.allowed_root.join(&project);
-        let sock_path = format!("/tmp/codex-{id}.sock");
-
-        let task = state
-            .db
-            .insert_discovered_task(NewDiscoveredTask {
-                id: id.clone(),
-                name: project.clone(),
-                project: project.clone(),
-                workdir: workdir.to_string_lossy().to_string(),
-                sock_path,
-                ttyd_port: i64::from(port),
-            })
-            .await?;
-
-        let _ = state
-            .db
-            .insert_log(
-                Some(&task.id),
-                "discover",
-                &format!("discovered project directory={}", task.project),
-            )
-            .await;
+async fn inspect_task(state: &AppState, project: &str) -> Result<Task, AppError> {
+    let workdir = task_workdir(state, project);
+    if !workdir.exists() {
+        return Err(AppError::NotFound(format!("task {project} not found")));
     }
 
+    let sock_path = task_sock_path(project);
+    let dtach_pid = state.runtime.find_session_pid(&sock_path).await;
+    let ttyd = state.runtime.find_ttyd_process(project).await;
+    let ttyd_pid = ttyd.map(|proc| proc.pid);
+    let ttyd_port = ttyd.map(|proc| i64::from(proc.port));
+    let session_started_at = match dtach_pid {
+        Some(pid) => state.runtime.process_started_at(pid).await,
+        None => None,
+    };
+    let terminal_started_at = match ttyd_pid {
+        Some(pid) => state.runtime.process_started_at(pid).await,
+        None => None,
+    };
+    let ttyd_command = match ttyd_pid {
+        Some(pid) => state.runtime.process_command(pid).await,
+        None => None,
+    };
+
+    let status = match (dtach_pid, ttyd_pid) {
+        (Some(_), Some(_)) => TaskStatus::Running,
+        (None, None) => TaskStatus::Stopped,
+        _ => TaskStatus::Error,
+    };
+
+    Ok(Task {
+        id: project.to_string(),
+        name: project.to_string(),
+        project: project.to_string(),
+        workdir: workdir.to_string_lossy().to_string(),
+        sock_path: sock_path.to_string_lossy().to_string(),
+        ttyd_port,
+        dtach_pid,
+        ttyd_pid,
+        dtach_command: dtach_launch_command(&workdir, &sock_path),
+        ttyd_command,
+        status,
+        session_started_at,
+        terminal_started_at,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeHealth {
+    Healthy,
+    SessionOnly,
+    Down,
+}
+
+fn runtime_health(task: &Task) -> RuntimeHealth {
+    match (task.dtach_pid, task.ttyd_pid) {
+        (Some(_), Some(_)) => RuntimeHealth::Healthy,
+        (Some(_), None) => RuntimeHealth::SessionOnly,
+        _ => RuntimeHealth::Down,
+    }
+}
+
+async fn ensure_task_running(state: &AppState, project: &str) -> Result<Task, AppError> {
+    let task = inspect_task(state, project).await?;
+    match runtime_health(&task) {
+        RuntimeHealth::Healthy => {
+            let port = task
+                .ttyd_port
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| AppError::Internal("invalid ttyd port".to_string()))?;
+            state
+                .route_map
+                .write()
+                .expect("route map lock poisoned")
+                .insert(project.to_string(), port);
+            Ok(task)
+        }
+        RuntimeHealth::SessionOnly => restart_ttyd(state, &task).await,
+        RuntimeHealth::Down => {
+            std::fs::create_dir_all(&task.workdir)?;
+            let port = allocate_port(state).await?;
+            let sock_path = Path::new(&task.sock_path);
+            let runtime =
+                start_full_task_runtime(state, &task.id, Path::new(&task.workdir), sock_path, port)
+                    .await?;
+
+            state
+                .route_map
+                .write()
+                .expect("route map lock poisoned")
+                .insert(task.id.clone(), port);
+
+            let _ = state
+                .db
+                .insert_log(Some(&task.id), "start", "task started")
+                .await;
+
+            Ok(Task {
+                dtach_pid: Some(runtime.dtach_pid),
+                ttyd_pid: Some(runtime.ttyd_pid),
+                ttyd_port: Some(i64::from(port)),
+                ttyd_command: state.runtime.process_command(runtime.ttyd_pid).await,
+                session_started_at: state.runtime.process_started_at(runtime.dtach_pid).await,
+                terminal_started_at: state.runtime.process_started_at(runtime.ttyd_pid).await,
+                status: TaskStatus::Running,
+                ..task
+            })
+        }
+    }
+}
+
+async fn restart_ttyd(state: &AppState, task: &Task) -> Result<Task, AppError> {
+    let port = allocate_port(state).await?;
+
+    let _ = state.runtime.stop_ttyd(task.ttyd_pid).await;
+
+    let ttyd_pid = state
+        .runtime
+        .start_ttyd(&task.id, Path::new(&task.sock_path), port)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    state
+        .route_map
+        .write()
+        .expect("route map lock poisoned")
+        .insert(task.id.clone(), port);
+
+    let _ = state
+        .db
+        .insert_log(
+            Some(&task.id),
+            "ttyd_restart",
+            "ttyd restarted and reattached",
+        )
+        .await;
+
+    Ok(Task {
+        ttyd_pid: Some(ttyd_pid),
+        ttyd_port: Some(i64::from(port)),
+        ttyd_command: state.runtime.process_command(ttyd_pid).await,
+        terminal_started_at: state.runtime.process_started_at(ttyd_pid).await,
+        status: TaskStatus::Running,
+        ..task.clone()
+    })
+}
+
+async fn start_full_task_runtime(
+    state: &AppState,
+    task_id: &str,
+    workdir: &Path,
+    sock_path: &Path,
+    port: u16,
+) -> Result<RuntimePids, AppError> {
+    state
+        .runtime
+        .start_task(task_id, workdir, sock_path, port)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+pub async fn reconcile_once(state: &AppState) -> Result<(), AppError> {
+    let mut tasks = Vec::new();
+    for project in discover_projects(state)? {
+        tasks.push(inspect_task(state, &project).await?);
+    }
+    let mut healthy_routes = HashMap::new();
+    let mut healthy_ids = HashSet::new();
+    let mut healthy_socks = HashSet::new();
+
+    for task in tasks {
+        match runtime_health(&task) {
+            RuntimeHealth::Healthy => {
+                if let Some(port) = task.ttyd_port.and_then(|value| u16::try_from(value).ok()) {
+                    healthy_routes.insert(task.id.clone(), port);
+                    healthy_ids.insert(task.id.clone());
+                    healthy_socks.insert(task.sock_path.clone());
+                }
+            }
+            RuntimeHealth::SessionOnly => match restart_ttyd(state, &task).await {
+                Ok(updated) => {
+                    if let Some(port) =
+                        updated.ttyd_port.and_then(|value| u16::try_from(value).ok())
+                    {
+                        healthy_routes.insert(updated.id.clone(), port);
+                        healthy_ids.insert(updated.id.clone());
+                        healthy_socks.insert(updated.sock_path.clone());
+                    }
+                }
+                Err(err) => {
+                    warn!(task_id = %task.id, error = %err, "failed to restart ttyd during reconcile");
+                }
+            },
+            RuntimeHealth::Down => {
+                let _ = state.runtime.stop_task(task.dtach_pid, task.ttyd_pid).await;
+            }
+        }
+    }
+
+    {
+        let mut route_map = state.route_map.write().expect("route map lock poisoned");
+        route_map.clear();
+        for (id, port) in healthy_routes {
+            route_map.insert(id, port);
+        }
+    }
+
+    cleanup_orphan_processes(&healthy_ids, &healthy_socks).await;
+    Ok(())
+}
+
+pub async fn discover_projects_once(state: &AppState) -> Result<(), AppError> {
+    std::fs::create_dir_all(&state.allowed_root)?;
     Ok(())
 }
 
@@ -895,7 +733,7 @@ async fn cleanup_orphan_processes(keep_ids: &HashSet<String>, keep_socks: &HashS
         }
     }
 
-    let ttyd_re = Regex::new(r"^\s*(\d+)\s+.*\bttyd\b.*-b\s+/term/([0-9a-fA-F-]{36})")
+    let ttyd_re = Regex::new(r"^\s*(\d+)\s+.*\bttyd\b.*-b\s+/term/([A-Za-z0-9._-]{1,64})")
         .expect("regex compile");
     let mut ttyd_by_task: HashMap<String, Vec<i64>> = HashMap::new();
     // Match ttyd commands even when extra flags (e.g. -W) are inserted before -b.
@@ -1038,11 +876,11 @@ fn validate_project(project: &str) -> Result<String, AppError> {
 
 async fn allocate_port(state: &AppState) -> Result<u16, AppError> {
     let used_ports: HashSet<u16> = state
-        .db
-        .list_used_ports()
-        .await?
+        .runtime
+        .list_ttyd_processes()
+        .await
         .into_iter()
-        .filter_map(|p| u16::try_from(p).ok())
+        .map(|(_, proc)| proc.port)
         .collect();
 
     for port in state.min_port..=state.max_port {
@@ -1069,12 +907,13 @@ pub fn build_base_state(db: Db, runtime: Arc<dyn RuntimeManager>, config: &AppCo
 }
 
 pub async fn hydrate_route_map(state: &AppState) -> Result<(), AppError> {
-    let routes = state.db.list_running_task_routes().await?;
+    let projects: HashSet<String> = discover_projects(state)?.into_iter().collect();
+    let routes = state.runtime.list_ttyd_processes().await;
     let mut map = state.route_map.write().expect("route map lock poisoned");
     map.clear();
-    for (id, port) in routes {
-        if let Ok(port) = u16::try_from(port) {
-            map.insert(id, port);
+    for (id, proc) in routes {
+        if projects.contains(&id) {
+            map.insert(id, proc.port);
         }
     }
     Ok(())
@@ -1249,14 +1088,6 @@ mod tests {
             .expect("build request failed");
         let resp = app.clone().oneshot(req).await.expect("request failed");
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let req = Request::builder()
-            .method("DELETE")
-            .uri(format!("/api/tasks/{task_id}"))
-            .body(Body::empty())
-            .expect("build request failed");
-        let resp = app.oneshot(req).await.expect("request failed");
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1325,5 +1156,36 @@ mod tests {
 
         assert_eq!(after_dtach, dtach_pid);
         assert_ne!(after_ttyd, ttyd_pid);
+    }
+
+    #[tokio::test]
+    async fn list_tasks_hides_missing_directories() {
+        let app = test_router().await;
+        let task_id = create_task_and_get_id_with_project(&app, "remove-me").await;
+
+        std::fs::remove_dir_all("/tmp/codex-tests/remove-me").expect("remove project dir failed");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/tasks")
+            .body(Body::empty())
+            .expect("build request failed");
+        let resp = app.oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("read body failed")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("invalid json");
+        let ids: Vec<String> = value
+            .as_array()
+            .expect("tasks array")
+            .iter()
+            .filter_map(|task| task.get("id").and_then(|id| id.as_str()).map(ToString::to_string))
+            .collect();
+
+        assert!(!ids.contains(&task_id));
     }
 }

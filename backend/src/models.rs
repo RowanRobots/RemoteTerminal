@@ -9,25 +9,6 @@ pub enum TaskStatus {
     Error,
 }
 
-impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Stopped => "stopped",
-            Self::Error => "error",
-        }
-    }
-
-    pub fn parse(value: &str) -> Self {
-        match value {
-            "running" => Self::Running,
-            "stopped" => Self::Stopped,
-            "error" => Self::Error,
-            _ => Self::Error,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -35,50 +16,18 @@ pub struct Task {
     pub project: String,
     pub workdir: String,
     pub sock_path: String,
-    pub ttyd_port: i64,
+    pub ttyd_port: Option<i64>,
     pub dtach_pid: Option<i64>,
     pub ttyd_pid: Option<i64>,
+    pub dtach_command: String,
+    pub ttyd_command: Option<String>,
     pub status: TaskStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct TaskRow {
-    pub id: String,
-    pub name: String,
-    pub project: String,
-    pub workdir: String,
-    pub sock_path: String,
-    pub ttyd_port: i64,
-    pub dtach_pid: Option<i64>,
-    pub ttyd_pid: Option<i64>,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<TaskRow> for Task {
-    fn from(value: TaskRow) -> Self {
-        Self {
-            id: value.id,
-            name: value.name,
-            project: value.project,
-            workdir: value.workdir,
-            sock_path: value.sock_path,
-            ttyd_port: value.ttyd_port,
-            dtach_pid: value.dtach_pid,
-            ttyd_pid: value.ttyd_pid,
-            status: TaskStatus::parse(&value.status),
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-        }
-    }
+    pub session_started_at: Option<DateTime<Utc>>,
+    pub terminal_started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {
-    pub name: Option<String>,
     pub project: String,
 }
 
