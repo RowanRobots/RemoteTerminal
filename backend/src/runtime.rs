@@ -167,6 +167,10 @@ impl RuntimeManager for ShellRuntimeManager {
         workdir: &Path,
         sock_path: &Path,
     ) -> Result<i64, RuntimeError> {
+        if let Some(parent_dir) = sock_path.parent() {
+            std::fs::create_dir_all(parent_dir).map_err(|e| RuntimeError::Io(e.to_string()))?;
+        }
+
         match std::fs::remove_file(sock_path) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -532,7 +536,6 @@ pub mod test_support {
             let task_id = sock_path
                 .file_name()?
                 .to_string_lossy()
-                .strip_prefix("codex-")?
                 .strip_suffix(".sock")?
                 .to_string();
             self.sessions
@@ -575,7 +578,7 @@ pub mod test_support {
                 .find_map(|(task_id, proc)| {
                     if proc.pid == task_pid {
                         Some(format!(
-                            "ttyd -i 127.0.0.1 -T xterm-256color -W -b /term/{task_id} -p {} dtach -a /tmp/codex-{task_id}.sock",
+                            "ttyd -i 127.0.0.1 -T xterm-256color -W -b /term/{task_id} -p {} dtach -a /tmp/remote_terminal/{task_id}.sock",
                             proc.port
                         ))
                     } else {

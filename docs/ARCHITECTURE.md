@@ -1,173 +1,199 @@
 # RemoteTerminal 架构文档
 
-## 目标
-构建一个基于网页的 RemoteTerminal 平台，支持按目录并行运行多个 Codex 任务，并在机器持续运行期间保证后台会话持久。
+## 当前目标
 
-本版本范围：
-- 前后端分离。
-- 浏览器断开后重连能回到同一个运行中的 Codex 任务。
-- 不要求机器重启后自动恢复。
+RemoteTerminal 现在的模型是一个“按目录管理会话”的网页终端控制台：
 
-## 总体设计
-将 `ttyd` 仅作为终端渲染组件使用。
-调度、安全、生命周期管理都放在外层控制系统中。
+- 页面列表来自 `ALLOWED_ROOT` 下的现有目录
+- 每个目录对应一个任务
+- 目录名就是任务 ID
+- `dtach` 负责持久会话
+- `ttyd` 负责网页终端
+- SQLite 只保留审计日志
 
-核心组件：
-1. `frontend`（任务管理页面）
-2. `control-api`（任务编排后端）
-3. `runtime`（每任务一组 `dtach + codex + ttyd`）
-4. `reverse-proxy`（HTTPS + 鉴权 + 路由）
-5. `sqlite`（任务元数据）
+这套实现关注的是：
+- 同一台机器运行期间的会话持续存在
+- 浏览器断开后重新打开仍能回到同一会话
+- 后端重启后能够重新探测目录和运行时状态
 
-## 已确认选型（2026-03-04）
-1. 后端：`Rust + Axum + Tokio`
-2. 前端：`Vue 3 + Vite`
-3. 终端层：`ttyd + dtach + codex`
-4. 反向代理：通用 HTTP 反向代理
-5. 数据存储：`SQLite`
-6. 部署策略：优先宿主机进程部署（非容器强依赖）
-7. 持久化策略：保证机器运行期间会话持久；暂不覆盖机器重启恢复
+当前不覆盖：
+- 机器重启后的自动恢复
+- 容器化部署
+- CPU / 内存隔离
 
-## 需求确认（2026-03-04）
-1. 目录策略：只允许 `~/code/<project>`；默认允许创建不存在目录。
-2. 终端访问路径：使用统一路由 `/term/{task_id}`，不对外暴露独立任务端口。
-3. 资源限制：首版不做 CPU/内存限制。
-4. 回收策略：任务不自动回收。
-5. 日志策略：记录任务级与访问级日志（创建、启动、停止、删除、终端访问）。
-6. 认证策略（临时）：先使用网关基础认证保护入口，后续可升级 OIDC。
+## 核心组件
 
-## 部署拓扑
-1. 浏览器访问 `https://your-domain`。
-2. 反向代理提供前端静态资源与 `/api/*`。
-3. 反向代理将 `/term/{task_id}` 转发到该任务对应的本地 `ttyd` 端口。
-4. `control-api` 在本机启动和停止运行时进程。
+1. `frontend`
+   - 任务列表
+   - 状态过滤
+   - 启动 / 停止
+   - 打开终端
 
-每个任务的运行时：
-- `dtach` socket 保持终端会话可重新附着。
-- `codex` 在任务目录中运行。
-- `ttyd` 将该会话暴露为网页终端。
+2. `backend`
+   - 扫描目录
+   - 探测运行时状态
+   - 启动 / 停止 `dtach + ttyd`
+   - 提供 API 和 `/term/*` 代理
 
-## 每任务进程模型
-变量定义：
-- `TASK_ID`：任务唯一标识
-- `DIR`：工作目录
-- `SOCK`：`/tmp/codex-${TASK_ID}.sock`
-- `PORT`：分配的本地端口
+3. `runtime`
+   - `dtach`
+   - `codex`
+   - `ttyd`
 
-启动 Codex 会话：
+4. `sqlite`
+   - 审计日志
+
+## 任务模型
+
+当前没有“任务定义表”。
+
+任务由目录直接推导：
+- `project = 目录名`
+- `task_id = project`
+- `workdir = ALLOWED_ROOT / project`
+
+例如：
+- `ALLOWED_ROOT=/home/orangepi/code`
+- 目录 `/home/orangepi/code/npu_test`
+
+那么页面上就会有一个 `npu_test` 任务。
+
+目录删除后，该任务会自然从列表中消失。
+
+## 运行时模型
+
+每个任务对应一组运行时资源：
+
+- `dtach` 会话
+- `codex` 进程
+- `ttyd` 进程
+
+约定：
+- socket 路径：`/tmp/remote_terminal/{project}.sock`
+- 终端访问路径：`/term/{project}/`
+- `ttyd` 监听：`127.0.0.1`
+- `ttyd` 端口：运行时动态分配
+
+启动会话的完整命令大致是：
+
 ```bash
-cd "$DIR" && dtach -n "$SOCK" codex --no-alt-screen
+dtach -n /tmp/remote_terminal/<project>.sock \
+  bash -lc "export TERM=xterm-256color COLORTERM=truecolor; cd '<workdir>' && codex; exec bash -i"
 ```
 
-暴露该会话网页终端：
+浏览器终端接入命令大致是：
+
 ```bash
-ttyd -i 127.0.0.1 -b "/term/$TASK_ID" -p "$PORT" dtach -a "$SOCK"
+ttyd -i 127.0.0.1 -T xterm-256color -W \
+  -b /term/<project> -p <port> \
+  dtach -a /tmp/remote_terminal/<project>.sock
 ```
 
-关键要求：
-- `ttyd` 必须只监听 `127.0.0.1`。
-- 公网访问必须经过反向代理与鉴权。
-- 默认不传 `dtach -r`，避免 `-r none` 导致新附着端不重绘的问题。
+## 状态来源
 
-## 分层职责
+页面状态不是从数据库读取，而是实时探测：
 
-### Frontend
-- 创建任务（项目名 + 目录）
-- 展示任务列表与状态
-- 打开终端
-- 停止/启动/删除任务
+- `dtach` 是否存在
+- `ttyd` 是否存在
+- `ttyd` 使用的端口
+- `dtach` / `ttyd` 的启动时间
+- `ttyd` 的真实命令行
 
-### Control API
-- 按白名单校验目录
-- 分配 `task_id` 与可用 `ttyd` 端口
-- 拉起/停止运行时进程
-- 读写 SQLite 元数据
-- 做健康检查与状态对账
+状态判定规则：
+- `dtach` 和 `ttyd` 都存在：`running`
+- 两者都不存在：`stopped`
+- 只有一侧存在：`error`
 
-### Reverse Proxy
-- TLS 终止
-- 身份认证与权限控制
-- 路由 `/term/{task_id}` 到 `127.0.0.1:{ttyd_port}`
-- 支持 WebSocket 升级
+如果 `dtach` 还活着但 `ttyd` 掉了，后端会只补拉 `ttyd`，不重建会话。
 
-### Runtime
-- `dtach` 提供 attach/detach 会话行为
-- `codex` 在目标目录执行任务
-- `ttyd` 提供浏览器终端渲染
+## 前端行为
 
-## 任务生命周期
+主界面只做运行控制，不做目录删除。
 
-### 创建任务
-1. 前端调用 `POST /api/tasks`
-2. 后端校验目录策略（仅允许 `~/code/*`）
-3. 按需创建目录
-4. 若同 `project` 已有任务，优先复用（幂等创建）
-5. 需要新建时启动 `dtach + codex`
-6. 启动 `ttyd`
-7. 写库并标记为 `running`
-8. 返回终端访问 URL
+每个任务卡片主要包含：
+- 状态
+- 启动 / 停止按钮
+- 打开终端按钮
+- `dtach` / `ttyd` 启动时间
+- `dtach` / `ttyd` 命令行
 
-### 打开任务
-1. 前端打开 `/term/{task_id}`
-2. 代理转发到该任务端口
-3. 浏览器附着到已有会话
+过滤逻辑：
+- 首次进入页面，优先显示“运行中”
+- 如果没有运行中的任务，则回到“全部”
+- 后续自动刷新不会强行改掉用户当前筛选
 
-### 停止任务
-1. 调用 `POST /api/tasks/{id}/stop`
-2. 先停止 `ttyd`，再停止 `dtach/codex`
-3. 更新状态为 `stopped`
+## API
 
-### 删除任务
-1. 调用 `DELETE /api/tasks/{id}`
-2. 确认进程全部停止
-3. 删除数据库记录
-4. 默认保留工作目录（更安全）
+当前主要接口：
 
-## 数据模型（SQLite）
-表：`tasks`
-- `id` TEXT PRIMARY KEY
-- `name` TEXT NOT NULL
-- `workdir` TEXT NOT NULL
-- `sock_path` TEXT NOT NULL
-- `ttyd_port` INTEGER NOT NULL UNIQUE
-- `dtach_pid` INTEGER
-- `ttyd_pid` INTEGER
-- `status` TEXT NOT NULL CHECK(status IN ('running','stopped','error'))
-- `created_at` DATETIME NOT NULL
-- `updated_at` DATETIME NOT NULL
+- `POST /api/tasks`
+  - 确保目标目录存在
+  - 启动对应任务
 
-建议索引：
-- `idx_tasks_status`（`status`）
-- `idx_tasks_workdir`（`workdir`）
+- `GET /api/tasks`
+  - 扫描目录并返回任务列表
 
-## API 约定（MVP）
-- `POST /api/tasks` 创建任务
-- `GET /api/tasks` 任务列表
-- `GET /api/tasks/{id}` 任务详情
-- `POST /api/tasks/{id}/start` 启动任务
-- `POST /api/tasks/{id}/stop` 停止任务
-- `DELETE /api/tasks/{id}` 删除任务
-- `GET /api/tasks/{id}/terminal-url` 获取终端访问地址
+- `GET /api/tasks/{id}`
+  - 读取单个任务的实时状态
 
-## 安全基线
-1. 强制目录白名单（例如 `~/code`）。
-2. 路径规范化并校验，阻止 `../` 穿越。
-3. 禁止直接公网暴露 `ttyd`。
-4. 在代理或网关层做登录鉴权。
-5. 记录创建/启动/停止/删除等审计日志。
-6. 命令执行参数化，避免拼接导致注入风险。
+- `POST /api/tasks/{id}/start`
+  - 启动任务
 
-## 运维说明
-- 本方案保证机器运行期间的断线重连持久化。
-- 本版本明确不覆盖机器重启后的自动恢复。
-- 若后续需要重启恢复，可增加进程守护与 `codex resume --last -C <dir>`。
-- 后端会在启动时执行一次 reconcile，并每 30 秒执行一次：
-  - 校准 `running` 任务状态（进程失效则标记为 `error`）
-  - 清理不在运行任务表中的残留 `dtach/ttyd` 进程
+- `POST /api/tasks/{id}/stop`
+  - 停止任务
 
-## 实施路线（建议）
-1. 先实现 `control-api + sqlite + 进程管理`。
-2. 完成创建/列表/启动/停止 API。
-3. 增加最小前端任务管理页。
-4. 配置反向代理与 `/term/{id}` WebSocket 转发。
-5. 补齐鉴权、目录策略与审计能力。
+- `GET /api/tasks/{id}/terminal-url`
+  - 返回网页终端地址
+
+- `GET /api/logs`
+  - 返回审计日志
+
+当前没有删除任务接口。
+
+## 数据存储
+
+SQLite 现在只用于审计日志。
+
+不再持久化这些内容：
+- 任务列表
+- 任务状态
+- socket 路径
+- `ttyd` 端口
+- GUID 任务 ID
+
+日志会自动裁剪，只保留最近 100 条。
+
+## 生产运行面
+
+生产环境的运行面发布到：
+
+```bash
+.prod-runtime/current
+```
+
+其中包含：
+- `bin/backend`
+- `config/remoteterminal.env`
+- `frontend/dist`
+- `scripts/run_backend.sh`
+- `var/data`
+
+标准发布流程：
+
+```bash
+./scripts/publish_runtime.sh
+./scripts/install_systemd_service.sh
+```
+
+## 当前边界
+
+这套实现适合：
+- 单机
+- 多目录
+- 会话可重复附着
+- 浏览器终端访问
+
+当前仍然保留的假设：
+- `ALLOWED_ROOT` 下目录名唯一且合法
+- 运行机器持续在线
+- `ttyd` 只对本地监听，外部访问通过反向代理或 tunnel
