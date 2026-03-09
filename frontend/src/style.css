@@ -199,6 +199,14 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.task-head-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
   align-items: center;
 }
 
@@ -211,14 +219,8 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
-.task-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.task-actions .block {
-  grid-column: 1 / -1;
+.control-button {
+  min-width: 92px;
 }
 
 .create-panel h2 {
@@ -341,11 +343,7 @@ button:disabled {
     gap: 12px;
   }
 
-  .task-actions {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .task-actions .block {
-    grid-column: auto;
+  .task-head {
+    align-items: center;
   }
 }

@@ -9,12 +9,14 @@ interface Task {
   project: string
   workdir: string
   sock_path: string
-  ttyd_port: number
+  ttyd_port: number | null
   dtach_pid: number | null
   ttyd_pid: number | null
+  dtach_command: string
+  ttyd_command: string | null
   status: TaskStatus
-  created_at: string
-  updated_at: string
+  session_started_at: string | null
+  terminal_started_at: string | null
 }
 
 interface AuditLog {
@@ -30,6 +32,7 @@ const logs = ref<AuditLog[]>([])
 const loading = ref(false)
 const logsLoading = ref(false)
 const submitting = ref(false)
+const taskActionId = ref<string | null>(null)
 const message = ref('')
 const error = ref('')
 const activeTab = ref<'tasks' | 'create' | 'logs'>('tasks')
@@ -37,8 +40,7 @@ const taskFilter = ref<'all' | TaskStatus>('all')
 const logFilter = ref<'all' | 'create' | 'start' | 'stop' | 'delete' | 'error'>('all')
 
 const form = reactive({
-  project: '',
-  name: ''
+  project: ''
 })
 
 let timer: number | undefined
@@ -57,6 +59,17 @@ const filteredLogs = computed(() => {
   })
 })
 const hasToast = computed(() => Boolean(message.value || error.value))
+
+function isTaskBusy(task: Task) {
+  return taskActionId.value === task.id
+}
+
+function taskActionLabel(task: Task) {
+  if (isTaskBusy(task)) {
+    return task.status === 'running' ? '停止中...' : '启动中...'
+  }
+  return task.status === 'running' ? '停止' : '启动'
+}
 
 function scheduleFlashClear() {
   if (flashTimer) window.clearTimeout(flashTimer)
@@ -140,12 +153,10 @@ async function createTask() {
     await request<Task>('/api/tasks', {
       method: 'POST',
       body: JSON.stringify({
-        project: form.project.trim(),
-        name: form.name.trim() || undefined
+        project: form.project.trim()
       })
     })
     form.project = ''
-    form.name = ''
     showMessage('任务已创建。')
     activeTab.value = 'tasks'
     await refreshAll()
@@ -157,39 +168,43 @@ async function createTask() {
 }
 
 async function startTask(task: Task) {
+  taskActionId.value = task.id
   try {
     await request(`/api/tasks/${task.id}/start`, { method: 'POST' })
     showMessage(`任务 ${task.name} 已启动。`)
     await refreshAll()
   } catch (err) {
     showError((err as Error).message)
+  } finally {
+    taskActionId.value = null
   }
 }
 
 async function stopTask(task: Task) {
+  taskActionId.value = task.id
   try {
     await request(`/api/tasks/${task.id}/stop`, { method: 'POST' })
     showMessage(`任务 ${task.name} 已停止。`)
     await refreshAll()
   } catch (err) {
     showError((err as Error).message)
-  }
-}
-
-async function deleteTask(task: Task) {
-  if (!window.confirm(`确认删除任务 ${task.name}？`)) return
-  try {
-    await request(`/api/tasks/${task.id}`, { method: 'DELETE' })
-    showMessage(`任务 ${task.name} 已删除。`)
-    await refreshAll()
-  } catch (err) {
-    showError((err as Error).message)
+  } finally {
+    taskActionId.value = null
   }
 }
 
 function openTerminal(task: Task) {
   const url = `/term/${task.id}/`
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function formatTime(value: string | null) {
+  if (!value) return '-'
+  return new Date(value).toLocaleString()
+}
+
+function formatRuntimeTimes(task: Task) {
+  return `dtach ${formatTime(task.session_started_at)} | ttyd ${formatTime(task.terminal_started_at)}`
 }
 
 onMounted(async () => {
@@ -243,17 +258,27 @@ onUnmounted(() => {
       <article v-for="task in filteredTasks" :key="task.id" class="card task-card">
         <header class="task-head">
           <strong>{{ task.name }}</strong>
-          <span class="badge" :class="task.status">{{ task.status }}</span>
+          <div class="task-head-controls">
+            <span class="badge" :class="task.status">{{ task.status }}</span>
+            <button
+              class="ghost control-button"
+              :disabled="isTaskBusy(task)"
+              @click="task.status === 'running' ? stopTask(task) : startTask(task)"
+            >
+              {{ taskActionLabel(task) }}
+            </button>
+            <button
+              class="primary control-button"
+              :disabled="task.status !== 'running' || isTaskBusy(task)"
+              @click="openTerminal(task)"
+            >
+              打开终端
+            </button>
+          </div>
         </header>
-        <p class="meta">Project: {{ task.project }}</p>
-        <p class="meta">Port: {{ task.ttyd_port }} | Updated: {{ new Date(task.updated_at).toLocaleString() }}</p>
-        <p class="muted id-text">{{ task.id }}</p>
-        <div class="task-actions">
-          <button class="primary block" @click="openTerminal(task)">打开终端</button>
-          <button class="ghost" :disabled="task.status === 'running'" @click="startTask(task)">启动</button>
-          <button class="ghost" :disabled="task.status !== 'running'" @click="stopTask(task)">停止</button>
-          <button class="danger" @click="deleteTask(task)">删除</button>
-        </div>
+        <p class="meta">{{ formatRuntimeTimes(task) }}</p>
+        <p class="muted id-text">{{ task.dtach_command }}</p>
+        <p v-if="task.ttyd_command" class="muted id-text">{{ task.ttyd_command }}</p>
       </article>
 
       <section v-if="filteredTasks.length === 0" class="card empty">当前筛选下暂无任务。</section>
@@ -264,10 +289,6 @@ onUnmounted(() => {
       <label>
         <span>Project</span>
         <input v-model="form.project" placeholder="例如: demo-app" />
-      </label>
-      <label>
-        <span>Name（可选）</span>
-        <input v-model="form.name" placeholder="例如: Demo Project" />
       </label>
       <button class="primary block sticky-action" :disabled="submitting" @click="createTask">
         {{ submitting ? '创建中...' : '创建终端任务' }}

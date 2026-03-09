@@ -33,7 +33,7 @@ describe('App', () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('多目录并行任务控制台')
+    expect(wrapper.text()).toContain('任务控制台')
     expect(fetchMock).toHaveBeenCalledWith('/api/tasks', expect.anything())
     expect(fetchMock).toHaveBeenCalledWith('/api/logs?limit=60', expect.anything())
   })
