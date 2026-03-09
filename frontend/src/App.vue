@@ -36,8 +36,10 @@ const taskActionId = ref<string | null>(null)
 const message = ref('')
 const error = ref('')
 const activeTab = ref<'tasks' | 'create' | 'logs'>('tasks')
-const taskFilter = ref<'all' | TaskStatus>('all')
+const taskFilter = ref<'all' | TaskStatus>('running')
 const logFilter = ref<'all' | 'create' | 'start' | 'stop' | 'delete' | 'error'>('all')
+const taskFilterTouched = ref(false)
+const taskFilterInitialized = ref(false)
 
 const form = reactive({
   project: ''
@@ -118,12 +120,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function loadTasks() {
   loading.value = true
   try {
-    tasks.value = await request<Task[]>('/api/tasks')
+    const nextTasks = await request<Task[]>('/api/tasks')
+    tasks.value = nextTasks
+
+    if (!taskFilterInitialized.value && !taskFilterTouched.value) {
+      const hasRunning = nextTasks.some((task) => task.status === 'running')
+      taskFilter.value = hasRunning ? 'running' : 'all'
+      taskFilterInitialized.value = true
+    }
   } catch (err) {
     showError((err as Error).message)
   } finally {
     loading.value = false
   }
+}
+
+function setTaskFilter(filter: 'all' | TaskStatus) {
+  taskFilterTouched.value = true
+  taskFilter.value = filter
 }
 
 async function loadLogs() {
@@ -249,10 +263,10 @@ onUnmounted(() => {
 
     <section v-if="activeTab === 'tasks'" class="panel">
       <div class="filter-row">
-        <button class="chip" :class="{ selected: taskFilter === 'all' }" @click="taskFilter = 'all'">全部</button>
-        <button class="chip" :class="{ selected: taskFilter === 'running' }" @click="taskFilter = 'running'">运行中</button>
-        <button class="chip" :class="{ selected: taskFilter === 'stopped' }" @click="taskFilter = 'stopped'">已停止</button>
-        <button class="chip" :class="{ selected: taskFilter === 'error' }" @click="taskFilter = 'error'">错误</button>
+        <button class="chip" :class="{ selected: taskFilter === 'all' }" @click="setTaskFilter('all')">全部</button>
+        <button class="chip" :class="{ selected: taskFilter === 'running' }" @click="setTaskFilter('running')">运行中</button>
+        <button class="chip" :class="{ selected: taskFilter === 'stopped' }" @click="setTaskFilter('stopped')">已停止</button>
+        <button class="chip" :class="{ selected: taskFilter === 'error' }" @click="setTaskFilter('error')">错误</button>
       </div>
 
       <article v-for="task in filteredTasks" :key="task.id" class="card task-card">
