@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-RemoteTerminal is a remote terminal entrypoint for Codex, CloudCode, and similar CLI agent workflows.
+RemoteTerminal is a browser-based terminal manager for Codex, CloudCode, and similar CLI agent workflows.
 
 ## What It Does
 
@@ -11,19 +11,40 @@ It scans project directories under `ALLOWED_ROOT` and lets you:
 - reopen sessions in the browser
 - manage multiple project terminals from one web UI
 
-Current runtime:
+At runtime:
 - `dtach` keeps sessions alive
-- `ttyd` exposes them in the browser
+- `ttyd` exposes terminals in the browser
 
 ## Install
 
 Requirements:
 - `codex`
 - `dtach`
+- `ttyd`
 - `node` / `npm`
 - `cargo` / `rustup`
 
 If `ttyd` is missing, the production publish script can install it into the user directory automatically.
+
+Example external dependency install:
+
+```bash
+sudo apt update
+sudo apt install -y dtach
+```
+
+`ttyd` is not bundled in this repository. If it is missing on the system, the production publish script can install it into the user directory automatically, or you can install it yourself using the upstream project instructions.
+
+## Third-Party Programs
+
+This project invokes the following standalone programs at runtime, but does not include their source code or binaries:
+
+- `ttyd`: https://github.com/tsl0922/ttyd
+  License: MIT
+- `dtach`: http://dtach.sourceforge.net/
+  License: GNU GPL
+
+They are installed and run as external dependencies and are not part of this project's source code.
 
 Development:
 
